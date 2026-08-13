@@ -1,4 +1,4 @@
-// Official Google Firebase Realtime Database Engine for AmourChat
+// Official Google Firebase Realtime Database Engine with Mobile Auto-Reconnect & REST Fallback
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, set, push, onValue, off, remove } from 'firebase/database';
@@ -28,6 +28,7 @@ let messagesStore = [];
 let isConnected = true;
 let typingTimeoutTimer = null;
 let broadcastChannel = null;
+let fallbackPollTimer = null;
 
 function getLocalMessages(roomId) {
   try {
@@ -84,53 +85,52 @@ function initSync(roomId) {
     };
   }
 
-  // 2. Detach previous Firebase listeners
-  if (messagesRef) off(messagesRef);
-  if (typingRef) off(typingRef);
-
   const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
 
-  // 3. Listen to Firebase Realtime Database Messages
+  // 2. Firebase Connection Monitor
+  const connectedRef = ref(db, '.info/connected');
+  onValue(connectedRef, (snap) => {
+    if (snap.val() === true) {
+      isConnected = true;
+      notifyConnection(true);
+    }
+  });
+
+  // 3. Attach Firebase Realtime WebSockets
+  attachFirebaseListeners(cleanRoomId);
+
+  // 4. Mobile Power-Saver / Tab Visibility Reconnect Listener
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        attachFirebaseListeners(cleanRoomId);
+        fetchFirebaseRestFallback(cleanRoomId);
+      }
+    });
+  }
+
+  // 5. REST HTTPS Polling Fallback (every 1.5s) - guarantees messages arrive even if mobile WebSockets sleep
+  fetchFirebaseRestFallback(cleanRoomId);
+  if (fallbackPollTimer) clearInterval(fallbackPollTimer);
+  fallbackPollTimer = setInterval(() => {
+    fetchFirebaseRestFallback(cleanRoomId);
+  }, 1500);
+}
+
+function attachFirebaseListeners(cleanRoomId) {
+  if (messagesRef) try { off(messagesRef); } catch (e) {}
+  if (typingRef) try { off(typingRef); } catch (e) {}
+
+  // 1. Listen to Firebase Realtime Database Messages
   messagesRef = ref(db, `rooms/${cleanRoomId}/messages`);
   onValue(messagesRef, (snapshot) => {
     const data = snapshot.val();
-    if (data) {
-      const cloudMsgList = Object.entries(data).map(([key, val]) => ({
-        _firebaseKey: key,
-        ...val
-      }));
-
-      let updated = false;
-      cloudMsgList.forEach((cloudMsg) => {
-        const existingIndex = messagesStore.findIndex((m) => m.id === cloudMsg.id);
-        if (existingIndex === -1) {
-          messagesStore.push(cloudMsg);
-          updated = true;
-        } else {
-          // Sync reactions & firebase key
-          messagesStore[existingIndex]._firebaseKey = cloudMsg._firebaseKey;
-          if (JSON.stringify(messagesStore[existingIndex].reactions) !== JSON.stringify(cloudMsg.reactions)) {
-            messagesStore[existingIndex].reactions = cloudMsg.reactions;
-            updated = true;
-          }
-        }
-      });
-
-      if (updated) {
-        messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        saveLocalMessages(roomId, messagesStore);
-        notifyMessages();
-      }
-    } else {
-      if (messagesStore.length === 0) {
-        notifyMessages();
-      }
-    }
+    processFirebaseMessagesData(data);
   }, (err) => {
     console.warn('Firebase DB listener warning:', err.message);
   });
 
-  // 4. Listen to Firebase Realtime Database Typing Status
+  // 2. Listen to Firebase Realtime Database Typing Status
   typingRef = ref(db, `rooms/${cleanRoomId}/typing`);
   onValue(typingRef, (snapshot) => {
     const data = snapshot.val();
@@ -148,6 +148,47 @@ function initSync(roomId) {
       });
     }
   });
+}
+
+async function fetchFirebaseRestFallback(cleanRoomId) {
+  try {
+    const restUrl = `${firebaseConfig.databaseURL}/rooms/${cleanRoomId}/messages.json`;
+    const res = await fetch(restUrl);
+    if (res.ok) {
+      const data = await res.json();
+      processFirebaseMessagesData(data);
+    }
+  } catch (e) {}
+}
+
+function processFirebaseMessagesData(data) {
+  if (!data) return;
+
+  const cloudMsgList = Object.entries(data).map(([key, val]) => ({
+    _firebaseKey: key,
+    ...val
+  }));
+
+  let updated = false;
+  cloudMsgList.forEach((cloudMsg) => {
+    const existingIndex = messagesStore.findIndex((m) => m.id === cloudMsg.id);
+    if (existingIndex === -1) {
+      messagesStore.push(cloudMsg);
+      updated = true;
+    } else {
+      messagesStore[existingIndex]._firebaseKey = cloudMsg._firebaseKey;
+      if (JSON.stringify(messagesStore[existingIndex].reactions) !== JSON.stringify(cloudMsg.reactions)) {
+        messagesStore[existingIndex].reactions = cloudMsg.reactions;
+        updated = true;
+      }
+    }
+  });
+
+  if (updated) {
+    messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    saveLocalMessages(currentRoomId, messagesStore);
+    notifyMessages();
+  }
 }
 
 function handleLocalPayload(type, payload) {
@@ -299,14 +340,24 @@ async function sendMsgPayloadInternal(roomId, payload) {
     } catch (e) {}
   }
 
-  // 3. Push message to Official Firebase Realtime Database
+  // 3. Push to Firebase Realtime WebSockets
+  const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
   try {
-    const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const roomMsgsRef = ref(db, `rooms/${cleanRoomId}/messages`);
     await push(roomMsgsRef, newMsg);
   } catch (e) {
     console.error('Firebase DB Push error:', e);
   }
+
+  // 4. HTTPS REST POST Fallback (for mobile background save)
+  try {
+    const restUrl = `${firebaseConfig.databaseURL}/rooms/${cleanRoomId}/messages.json`;
+    await fetch(restUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newMsg)
+    });
+  } catch (e) {}
 
   return msgId;
 }
