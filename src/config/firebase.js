@@ -1,4 +1,4 @@
-// Ultra-Reliable 24/7 Global Realtime Engine for AmourChat
+// Ultra-Reliable 24/7 Global Realtime Engine for AmourChat (With Free Cloud Media Host & Typing Sync)
 
 let currentRoomId = null;
 let socket = null;
@@ -35,6 +35,31 @@ function getTopicName(roomId) {
   return `amour_couple_room_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 }
 
+/**
+ * Upload image/audio file to free cloud host (tmpfiles.org) for tiny real-time message payloads
+ */
+async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
+  try {
+    const formData = new FormData();
+    formData.append('file', fileOrBlob, filename);
+
+    const res = await fetch('https://tmpfiles.org/api/v1/upload', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (json && json.data && json.data.url) {
+      // Transform view URL to direct file URL: tmpfiles.org/123/file.png -> tmpfiles.org/dl/123/file.png
+      return json.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+    }
+  } catch (e) {
+    console.error('Media upload error:', e);
+  }
+  return null;
+}
+
 function initSync(roomId) {
   if (currentRoomId === roomId && socket && socket.readyState === WebSocket.OPEN) {
     return;
@@ -55,13 +80,13 @@ function initSync(roomId) {
     };
   }
 
-  // 2. Fetch all historical cloud messages from ntfy.sh REST
+  // 2. Fetch cloud history
   fetchCloudHistory(roomId);
 
   // 3. Connect to WSS WebSockets for sub-second real-time push
   initWssSocket(roomId);
 
-  // 4. Fallback REST poll every 2 seconds to guarantee 100% message delivery
+  // 4. REST poll fallback every 2 seconds
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
     fetchCloudHistory(roomId);
@@ -88,9 +113,8 @@ function initWssSocket(roomId) {
       try {
         const data = JSON.parse(event.data);
         if (data.event === 'message' && data.message) {
-          const parsedPayload = JSON.parse(data.message);
-          const { type, payload } = parsedPayload;
-          handleIncomingPayload(type, payload);
+          const parsed = JSON.parse(data.message);
+          handleIncomingPayload(parsed.type, parsed.payload);
         }
       } catch (e) {}
     };
@@ -138,6 +162,8 @@ async function fetchCloudHistory(roomId) {
               targetMsg.reactions[userId] = emoji;
               updated = true;
             }
+          } else if (parsed.type === 'typing' && parsed.payload) {
+            notifyTyping(parsed.payload);
           }
         }
       } catch (e) {}
@@ -230,12 +256,27 @@ export async function sendMessage(roomId, senderId, senderName, senderAvatar, te
 /**
  * Send an image message
  */
-export async function sendImageMessage(roomId, senderId, senderName, imageDataUrl, caption = '') {
+export async function sendImageMessage(roomId, senderId, senderName, imageFileOrUrl, caption = '') {
+  let mediaUrl = imageFileOrUrl;
+
+  // If passed a Blob/File or base64, upload to cloud host first for tiny payload
+  if (typeof imageFileOrUrl !== 'string' || imageFileOrUrl.startsWith('data:')) {
+    let blobToUpload = imageFileOrUrl;
+    if (typeof imageFileOrUrl === 'string' && imageFileOrUrl.startsWith('data:')) {
+      const res = await fetch(imageFileOrUrl);
+      blobToUpload = await res.blob();
+    }
+    const uploadedUrl = await uploadMediaFile(blobToUpload, 'photo.jpg');
+    if (uploadedUrl) {
+      mediaUrl = uploadedUrl;
+    }
+  }
+
   const newMsgPayload = {
     senderId,
     senderName,
     messageType: 'image',
-    mediaUrl: imageDataUrl,
+    mediaUrl,
     text: caption.trim()
   };
 
@@ -245,12 +286,26 @@ export async function sendImageMessage(roomId, senderId, senderName, imageDataUr
 /**
  * Send a voice audio note message
  */
-export async function sendAudioMessage(roomId, senderId, senderName, audioDataUrl, durationSec = 0) {
+export async function sendAudioMessage(roomId, senderId, senderName, audioBlobOrUrl, durationSec = 0) {
+  let mediaUrl = audioBlobOrUrl;
+
+  if (typeof audioBlobOrUrl !== 'string' || audioBlobOrUrl.startsWith('data:')) {
+    let blobToUpload = audioBlobOrUrl;
+    if (typeof audioBlobOrUrl === 'string' && audioBlobOrUrl.startsWith('data:')) {
+      const res = await fetch(audioBlobOrUrl);
+      blobToUpload = await res.blob();
+    }
+    const uploadedUrl = await uploadMediaFile(blobToUpload, 'voice_note.webm');
+    if (uploadedUrl) {
+      mediaUrl = uploadedUrl;
+    }
+  }
+
   const newMsgPayload = {
     senderId,
     senderName,
     messageType: 'audio',
-    mediaUrl: audioDataUrl,
+    mediaUrl,
     duration: durationSec,
     text: ''
   };
@@ -267,21 +322,21 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Local Optimistic Render & Storage
+  // 1. Optimistic Local Storage
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. Local BroadcastChannel
+  // 2. BroadcastChannel
   if (broadcastChannel) {
     try {
       broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
     } catch (e) {}
   }
 
-  // 3. Post to Global Real-Time Cloud Server (ntfy.sh)
+  // 3. Post to Global Cloud Topic
   const topic = getTopicName(roomId);
   try {
     await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
@@ -302,9 +357,7 @@ export async function clearRoomMessages(roomId) {
   notifyMessages();
 
   if (broadcastChannel) {
-    try {
-      broadcastChannel.postMessage({ type: 'clear_chat' });
-    } catch (e) {}
+    try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
   }
 
   const topic = getTopicName(roomId);
@@ -320,14 +373,21 @@ export async function clearRoomMessages(roomId) {
  * Update typing status for a user
  */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
+  const payload = { userId, userName, isTyping };
+
   if (broadcastChannel) {
     try {
-      broadcastChannel.postMessage({
-        type: 'typing',
-        payload: { userId, userName, isTyping }
-      });
+      broadcastChannel.postMessage({ type: 'typing', payload });
     } catch (e) {}
   }
+
+  const topic = getTopicName(roomId);
+  try {
+    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'typing', payload })
+    });
+  } catch (e) {}
 }
 
 /**
