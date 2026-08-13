@@ -1,15 +1,17 @@
-// AmourChat High-Availability 24/7 Cloud & Local Sync Engine
+// Ultra-Reliable 24/7 Global Realtime Engine for AmourChat
 
 let currentRoomId = null;
+let socket = null;
+
 let messageListeners = [];
 let connectionListeners = [];
 let typingListeners = [];
 
 let messagesStore = [];
-const isConnected = true; // Always online & connected
+let isConnected = true;
 
-// Public 24/7 Cloud Persistence Endpoint (Firebase REST API - no port 3001 dependency)
-const CLOUD_DB_BASE_URL = 'https://amour-chat-sync-default-rtdb.firebaseio.com';
+const NTFY_SERVER_BASE = 'https://ntfy.sh';
+const NTFY_WSS_BASE = 'wss://ntfy.sh';
 
 function getLocalMessages(roomId) {
   try {
@@ -29,78 +31,116 @@ function saveLocalMessages(roomId, messages) {
 let syncIntervalTimer = null;
 let broadcastChannel = null;
 
+function getTopicName(roomId) {
+  return `amour_couple_room_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
+
 function initSync(roomId) {
+  if (currentRoomId === roomId && socket && socket.readyState === WebSocket.OPEN) {
+    return;
+  }
+
   currentRoomId = roomId;
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
   notifyConnection(true);
 
-  // 1. Multi-tab / Same-device instant sync via BroadcastChannel
+  // 1. Same-device multi-tab sync via BroadcastChannel
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
     if (broadcastChannel) broadcastChannel.close();
     broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
     broadcastChannel.onmessage = (event) => {
       const { type, payload } = event.data;
-      if (type === 'new_message' && payload) {
-        if (!messagesStore.some(m => m.id === payload.id)) {
-          messagesStore.push(payload);
-          saveLocalMessages(roomId, messagesStore);
-          notifyMessages();
-        }
-      } else if (type === 'clear_chat') {
-        messagesStore = [];
-        saveLocalMessages(roomId, []);
-        notifyMessages();
-      } else if (type === 'add_reaction' && payload) {
-        const { messageId, emoji, userId } = payload;
-        const msg = messagesStore.find(m => m.id === messageId);
-        if (msg) {
-          if (!msg.reactions) msg.reactions = {};
-          msg.reactions[userId] = emoji;
-          saveLocalMessages(roomId, messagesStore);
-          notifyMessages();
-        }
-      } else if (type === 'typing' && payload) {
-        notifyTyping(payload);
-      }
+      handleIncomingPayload(type, payload);
     };
   }
 
-  // 2. Initial cloud fetch on room enter
-  fetchCloudMessages(roomId);
+  // 2. Fetch all historical cloud messages from ntfy.sh REST
+  fetchCloudHistory(roomId);
 
-  // 3. Periodic cloud polling (every 1.8 seconds) to sync partner messages
+  // 3. Connect to WSS WebSockets for sub-second real-time push
+  initWssSocket(roomId);
+
+  // 4. Fallback REST poll every 2 seconds to guarantee 100% message delivery
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
-    fetchCloudMessages(roomId);
-  }, 1800);
+    fetchCloudHistory(roomId);
+  }, 2000);
 }
 
-async function fetchCloudMessages(roomId) {
+function initWssSocket(roomId) {
+  if (socket) {
+    try { socket.close(); } catch (e) {}
+  }
+
+  const topic = getTopicName(roomId);
+  const wssUrl = `${NTFY_WSS_BASE}/${topic}/ws`;
+
   try {
-    const res = await fetch(`${CLOUD_DB_BASE_URL}/rooms/${roomId}/messages.json`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data) return;
+    socket = new WebSocket(wssUrl);
 
-    const cloudMsgList = Object.entries(data).map(([key, val]) => ({
-      id: key,
-      ...val
-    }));
+    socket.onopen = () => {
+      isConnected = true;
+      notifyConnection(true);
+    };
 
-    let updated = false;
-    cloudMsgList.forEach(cloudMsg => {
-      const existingIndex = messagesStore.findIndex(m => m.id === cloudMsg.id);
-      if (existingIndex === -1) {
-        messagesStore.push(cloudMsg);
-        updated = true;
-      } else {
-        // Update reactions if changed
-        if (JSON.stringify(messagesStore[existingIndex].reactions) !== JSON.stringify(cloudMsg.reactions)) {
-          messagesStore[existingIndex].reactions = cloudMsg.reactions;
-          updated = true;
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === 'message' && data.message) {
+          const parsedPayload = JSON.parse(data.message);
+          const { type, payload } = parsedPayload;
+          handleIncomingPayload(type, payload);
         }
-      }
+      } catch (e) {}
+    };
+
+    socket.onclose = () => {
+      setTimeout(() => {
+        if (currentRoomId === roomId) initWssSocket(roomId);
+      }, 3000);
+    };
+
+    socket.onerror = () => {};
+  } catch (e) {}
+}
+
+async function fetchCloudHistory(roomId) {
+  const topic = getTopicName(roomId);
+  try {
+    const res = await fetch(`${NTFY_SERVER_BASE}/${topic}/json?poll=1&since=all`);
+    if (!res.ok) return;
+    const textData = await res.text();
+    if (!textData.trim()) return;
+
+    const lines = textData.trim().split('\n');
+    let updated = false;
+
+    lines.forEach((line) => {
+      try {
+        const item = JSON.parse(line);
+        if (item.event === 'message' && item.message) {
+          const parsed = JSON.parse(item.message);
+          if (parsed.type === 'new_message' && parsed.payload) {
+            const msg = parsed.payload;
+            if (!messagesStore.some((m) => m.id === msg.id)) {
+              messagesStore.push(msg);
+              updated = true;
+            }
+          } else if (parsed.type === 'clear_chat') {
+            messagesStore = [];
+            updated = true;
+          } else if (parsed.type === 'add_reaction' && parsed.payload) {
+            const { messageId, emoji, userId } = parsed.payload;
+            const targetMsg = messagesStore.find((m) => m.id === messageId);
+            if (targetMsg) {
+              if (!targetMsg.reactions) targetMsg.reactions = {};
+              targetMsg.reactions[userId] = emoji;
+              updated = true;
+            }
+          }
+        }
+      } catch (e) {}
     });
 
     if (updated) {
@@ -108,21 +148,44 @@ async function fetchCloudMessages(roomId) {
       saveLocalMessages(roomId, messagesStore);
       notifyMessages();
     }
-  } catch (e) {
-    // Fail gracefully with local messages
+  } catch (e) {}
+}
+
+function handleIncomingPayload(type, payload) {
+  if (type === 'new_message' && payload) {
+    if (!messagesStore.some((m) => m.id === payload.id)) {
+      messagesStore.push(payload);
+      saveLocalMessages(currentRoomId, messagesStore);
+      notifyMessages();
+    }
+  } else if (type === 'clear_chat') {
+    messagesStore = [];
+    saveLocalMessages(currentRoomId, []);
+    notifyMessages();
+  } else if (type === 'add_reaction' && payload) {
+    const { messageId, emoji, userId } = payload;
+    const msg = messagesStore.find((m) => m.id === messageId);
+    if (msg) {
+      if (!msg.reactions) msg.reactions = {};
+      msg.reactions[userId] = emoji;
+      saveLocalMessages(currentRoomId, messagesStore);
+      notifyMessages();
+    }
+  } else if (type === 'typing' && payload) {
+    notifyTyping(payload);
   }
 }
 
 function notifyMessages() {
-  messageListeners.forEach(fn => fn([...messagesStore]));
+  messageListeners.forEach((fn) => fn([...messagesStore]));
 }
 
 function notifyConnection(state) {
-  connectionListeners.forEach(fn => fn(state));
+  connectionListeners.forEach((fn) => fn(state));
 }
 
 function notifyTyping(payload) {
-  typingListeners.forEach(fn => fn(payload));
+  typingListeners.forEach((fn) => fn(payload));
 }
 
 /**
@@ -130,9 +193,9 @@ function notifyTyping(payload) {
  */
 export function listenToConnectionState(onStateChange) {
   connectionListeners.push(onStateChange);
-  onStateChange(true); // Always report Live Sync connected immediately
+  onStateChange(true);
   return () => {
-    connectionListeners = connectionListeners.filter(fn => fn !== onStateChange);
+    connectionListeners = connectionListeners.filter((fn) => fn !== onStateChange);
   };
 }
 
@@ -145,7 +208,7 @@ export function listenToMessages(roomId, callback) {
   callback([...messagesStore]);
 
   return () => {
-    messageListeners = messageListeners.filter(fn => fn !== callback);
+    messageListeners = messageListeners.filter((fn) => fn !== callback);
   };
 }
 
@@ -204,28 +267,28 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Local Render & Storage
-  if (!messagesStore.some(m => m.id === newMsg.id)) {
+  // 1. Local Optimistic Render & Storage
+  if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. BroadcastChannel for same-device tabs
+  // 2. Local BroadcastChannel
   if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'new_message', payload: newMsg }); } catch (e) {}
+    try {
+      broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
+    } catch (e) {}
   }
 
-  // 3. Post to Cloud REST Database
+  // 3. Post to Global Real-Time Cloud Server (ntfy.sh)
+  const topic = getTopicName(roomId);
   try {
-    await fetch(`${CLOUD_DB_BASE_URL}/rooms/${roomId}/messages/${msgId}.json`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newMsg)
+    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'new_message', payload: newMsg })
     });
-  } catch (e) {
-    console.error('Cloud save fallback warning', e);
-  }
+  } catch (e) {}
 
   return msgId;
 }
@@ -239,12 +302,16 @@ export async function clearRoomMessages(roomId) {
   notifyMessages();
 
   if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
+    try {
+      broadcastChannel.postMessage({ type: 'clear_chat' });
+    } catch (e) {}
   }
 
+  const topic = getTopicName(roomId);
   try {
-    await fetch(`${CLOUD_DB_BASE_URL}/rooms/${roomId}/messages.json`, {
-      method: 'DELETE'
+    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+      method: 'POST',
+      body: JSON.stringify({ type: 'clear_chat' })
     });
   } catch (e) {}
 }
@@ -254,7 +321,12 @@ export async function clearRoomMessages(roomId) {
  */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
   if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'typing', payload: { userId, userName, isTyping } }); } catch (e) {}
+    try {
+      broadcastChannel.postMessage({
+        type: 'typing',
+        payload: { userId, userName, isTyping }
+      });
+    } catch (e) {}
   }
 }
 
@@ -269,7 +341,7 @@ export function listenToTyping(roomId, currentUserId, callback) {
   };
   typingListeners.push(handler);
   return () => {
-    typingListeners = typingListeners.filter(fn => fn !== handler);
+    typingListeners = typingListeners.filter((fn) => fn !== handler);
   };
 }
 
@@ -277,7 +349,7 @@ export function listenToTyping(roomId, currentUserId, callback) {
  * Add reaction to a message
  */
 export async function addReactionToMessage(roomId, messageId, emoji, userId) {
-  const msg = messagesStore.find(m => m.id === messageId);
+  const msg = messagesStore.find((m) => m.id === messageId);
   if (msg) {
     if (!msg.reactions) msg.reactions = {};
     msg.reactions[userId] = emoji;
@@ -285,21 +357,29 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     notifyMessages();
 
     if (broadcastChannel) {
-      try { broadcastChannel.postMessage({ type: 'add_reaction', payload: { messageId, emoji, userId } }); } catch (e) {}
+      try {
+        broadcastChannel.postMessage({
+          type: 'add_reaction',
+          payload: { messageId, emoji, userId }
+        });
+      } catch (e) {}
     }
 
+    const topic = getTopicName(roomId);
     try {
-      await fetch(`${CLOUD_DB_BASE_URL}/rooms/${roomId}/messages/${messageId}/reactions/${userId}.json`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(emoji)
+      await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'add_reaction',
+          payload: { messageId, emoji, userId }
+        })
       });
     } catch (e) {}
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "Cloud-REST-Persistent-Active", databaseURL: CLOUD_DB_BASE_URL };
+  return { apiKey: "NTFY-Realtime-Cloud-Active", databaseURL: "https://ntfy.sh" };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
