@@ -1,17 +1,17 @@
-// Ultra-Fast High-Performance Real-Time Engine for AmourChat
+// High-Availability 24/7 Global Cloud Sync Engine for AmourChat
 
 let currentRoomId = null;
-let socket = null;
+let roomObjectId = null;
 
 let messageListeners = [];
 let connectionListeners = [];
 let typingListeners = [];
 
 let messagesStore = [];
-let isConnected = true;
+let partnerTypingName = null;
+const isConnected = true;
 
-const NTFY_SERVER_BASE = 'https://ntfy.sh';
-const NTFY_WSS_BASE = 'wss://ntfy.sh';
+const CLOUD_API_BASE = 'https://api.restful-api.dev/objects';
 
 function getLocalMessages(roomId) {
   try {
@@ -28,16 +28,22 @@ function saveLocalMessages(roomId, messages) {
   } catch (e) {}
 }
 
-let syncIntervalTimer = null;
-let broadcastChannel = null;
-let typingAutoClearTimer = null;
-
-function getTopicName(roomId) {
-  return `amour_couple_room_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+function getStoredObjectId(roomId) {
+  return localStorage.getItem(`amour_obj_id_${roomId}`) || null;
 }
 
+function saveStoredObjectId(roomId, objId) {
+  if (objId) {
+    localStorage.setItem(`amour_obj_id_${roomId}`, objId);
+  }
+}
+
+let syncIntervalTimer = null;
+let broadcastChannel = null;
+let typingTimeoutTimer = null;
+
 /**
- * Fast cloud media file uploader
+ * Upload photos or voice notes to free cloud CDN
  */
 async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
   try {
@@ -61,122 +67,104 @@ async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
 }
 
 function initSync(roomId) {
-  if (currentRoomId === roomId && socket && socket.readyState === WebSocket.OPEN) {
-    return;
-  }
-
   currentRoomId = roomId;
+  roomObjectId = getStoredObjectId(roomId);
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
   notifyConnection(true);
 
-  // 1. Instant local tab broadcast
+  // 1. Same-device multi-tab BroadcastChannel
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
     if (broadcastChannel) broadcastChannel.close();
     broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
     broadcastChannel.onmessage = (event) => {
       const { type, payload } = event.data;
-      handleIncomingPayload(type, payload);
+      handleLocalPayload(type, payload);
     };
   }
 
-  // 2. Fetch cloud history (messages only, no historical typing logs)
-  fetchCloudHistory(roomId);
+  // 2. Fetch cloud messages immediately
+  fetchCloudMessages(roomId);
 
-  // 3. Connect to subsecond WSS WebSockets
-  initWssSocket(roomId);
-
-  // 4. Fast polling interval (600ms) for high-speed response
+  // 3. Fast cloud polling every 1.5 seconds for instant 24/7 cross-device sync
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
-    fetchCloudHistory(roomId);
-  }, 600);
+    fetchCloudMessages(roomId);
+  }, 1500);
 }
 
-function initWssSocket(roomId) {
-  if (socket) {
-    try { socket.close(); } catch (e) {}
-  }
-
-  const topic = getTopicName(roomId);
-  const wssUrl = `${NTFY_WSS_BASE}/${topic}/ws`;
-
+async function fetchCloudMessages(roomId) {
   try {
-    socket = new WebSocket(wssUrl);
+    let targetObjId = roomObjectId || getStoredObjectId(roomId);
 
-    socket.onopen = () => {
-      isConnected = true;
-      notifyConnection(true);
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.event === 'message' && data.message) {
-          const parsed = JSON.parse(data.message);
-          handleIncomingPayload(parsed.type, parsed.payload);
+    if (targetObjId) {
+      const res = await fetch(`${CLOUD_API_BASE}/${targetObjId}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json && json.data) {
+          processCloudData(roomId, json.data);
+          return;
         }
-      } catch (e) {}
-    };
+      }
+    }
 
-    socket.onclose = () => {
-      setTimeout(() => {
-        if (currentRoomId === roomId) initWssSocket(roomId);
-      }, 1500);
-    };
-
-    socket.onerror = () => {};
-  } catch (e) {}
-}
-
-async function fetchCloudHistory(roomId) {
-  const topic = getTopicName(roomId);
-  try {
-    const res = await fetch(`${NTFY_SERVER_BASE}/${topic}/json?poll=1&since=30s`);
-    if (!res.ok) return;
-    const textData = await res.text();
-    if (!textData.trim()) return;
-
-    const lines = textData.trim().split('\n');
-    let updated = false;
-
-    lines.forEach((line) => {
-      try {
-        const item = JSON.parse(line);
-        if (item.event === 'message' && item.message) {
-          const parsed = JSON.parse(item.message);
-          // ONLY process messages & reactions (IGNORE historical typing events)
-          if (parsed.type === 'new_message' && parsed.payload) {
-            const msg = parsed.payload;
-            if (!messagesStore.some((m) => m.id === msg.id)) {
-              messagesStore.push(msg);
-              updated = true;
-            }
-          } else if (parsed.type === 'clear_chat') {
-            messagesStore = [];
-            updated = true;
-          } else if (parsed.type === 'add_reaction' && parsed.payload) {
-            const { messageId, emoji, userId } = parsed.payload;
-            const targetMsg = messagesStore.find((m) => m.id === messageId);
-            if (targetMsg) {
-              if (!targetMsg.reactions) targetMsg.reactions = {};
-              targetMsg.reactions[userId] = emoji;
-              updated = true;
-            }
-          }
+    // Search room object by name if not cached yet
+    const searchRes = await fetch(CLOUD_API_BASE);
+    if (searchRes.ok) {
+      const allObjs = await searchRes.json();
+      const targetName = `amour_room_v3_${roomId}`;
+      const found = allObjs.find((o) => o.name === targetName);
+      if (found) {
+        roomObjectId = found.id;
+        saveStoredObjectId(roomId, found.id);
+        if (found.data) {
+          processCloudData(roomId, found.data);
         }
-      } catch (e) {}
-    });
-
-    if (updated) {
-      messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-      saveLocalMessages(roomId, messagesStore);
-      notifyMessages();
+      }
     }
   } catch (e) {}
 }
 
-function handleIncomingPayload(type, payload) {
+function processCloudData(roomId, data) {
+  let updated = false;
+
+  // Process Messages
+  if (Array.isArray(data.messages)) {
+    data.messages.forEach((cloudMsg) => {
+      const existingIndex = messagesStore.findIndex((m) => m.id === cloudMsg.id);
+      if (existingIndex === -1) {
+        messagesStore.push(cloudMsg);
+        updated = true;
+      } else {
+        if (JSON.stringify(messagesStore[existingIndex].reactions) !== JSON.stringify(cloudMsg.reactions)) {
+          messagesStore[existingIndex].reactions = cloudMsg.reactions;
+          updated = true;
+        }
+      }
+    });
+  }
+
+  // Process Partner Typing
+  if (data.typing) {
+    const { userId, userName, isTyping, timestamp } = data.typing;
+    const currentUserId = localStorage.getItem('amour_user_id');
+    if (userId !== currentUserId) {
+      if (isTyping && Date.now() - (timestamp || 0) < 4000) {
+        notifyTyping({ userId, userName, isTyping: true });
+      } else {
+        notifyTyping({ userId, userName, isTyping: false });
+      }
+    }
+  }
+
+  if (updated) {
+    messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    saveLocalMessages(roomId, messagesStore);
+    notifyMessages();
+  }
+}
+
+function handleLocalPayload(type, payload) {
   if (type === 'new_message' && payload) {
     if (!messagesStore.some((m) => m.id === payload.id)) {
       messagesStore.push(payload);
@@ -210,21 +198,15 @@ function notifyConnection(state) {
 }
 
 function notifyTyping(payload) {
-  // Call listener with current typing state
   typingListeners.forEach((fn) => fn(payload));
-
-  // Auto-clear typing status after 2.5s if no new typing ping arrives
-  if (typingAutoClearTimer) clearTimeout(typingAutoClearTimer);
+  if (typingTimeoutTimer) clearTimeout(typingTimeoutTimer);
   if (payload && payload.isTyping) {
-    typingAutoClearTimer = setTimeout(() => {
+    typingTimeoutTimer = setTimeout(() => {
       typingListeners.forEach((fn) => fn({ ...payload, isTyping: false }));
     }, 2500);
   }
 }
 
-/**
- * Listen to Connection State
- */
 export function listenToConnectionState(onStateChange) {
   connectionListeners.push(onStateChange);
   onStateChange(true);
@@ -233,9 +215,6 @@ export function listenToConnectionState(onStateChange) {
   };
 }
 
-/**
- * Listen to messages in a room
- */
 export function listenToMessages(roomId, callback) {
   messageListeners.push(callback);
   initSync(roomId);
@@ -246,9 +225,6 @@ export function listenToMessages(roomId, callback) {
   };
 }
 
-/**
- * Send a text message
- */
 export async function sendMessage(roomId, senderId, senderName, senderAvatar, text) {
   const newMsgPayload = {
     senderId,
@@ -261,9 +237,6 @@ export async function sendMessage(roomId, senderId, senderName, senderAvatar, te
   return sendMsgPayloadInternal(roomId, newMsgPayload);
 }
 
-/**
- * Send an image message
- */
 export async function sendImageMessage(roomId, senderId, senderName, imageFileOrUrl, caption = '') {
   let mediaUrl = imageFileOrUrl;
 
@@ -290,9 +263,6 @@ export async function sendImageMessage(roomId, senderId, senderName, imageFileOr
   return sendMsgPayloadInternal(roomId, newMsgPayload);
 }
 
-/**
- * Send a voice audio note message
- */
 export async function sendAudioMessage(roomId, senderId, senderName, audioBlobOrUrl, durationSec = 0) {
   let mediaUrl = audioBlobOrUrl;
 
@@ -320,7 +290,7 @@ export async function sendAudioMessage(roomId, senderId, senderName, audioBlobOr
   return sendMsgPayloadInternal(roomId, newMsgPayload);
 }
 
-function sendMsgPayloadInternal(roomId, payload) {
+async function sendMsgPayloadInternal(roomId, payload) {
   const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
   const newMsg = {
     id: msgId,
@@ -329,33 +299,58 @@ function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Render (<1ms)
+  // 1. Optimistic Local Render (<1ms)
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. BroadcastChannel (0ms)
+  // 2. Local BroadcastChannel
   if (broadcastChannel) {
     try {
       broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
     } catch (e) {}
   }
 
-  // 3. Fast Cloud Post
-  const topic = getTopicName(roomId);
-  fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-    method: 'POST',
-    body: JSON.stringify({ type: 'new_message', payload: newMsg })
-  }).catch(() => {});
+  // 3. Save to Global Cloud Database Object
+  syncCloudRoomData(roomId);
 
   return msgId;
 }
 
-/**
- * Clear all messages in a room
- */
+async function syncCloudRoomData(roomId, typingData = null) {
+  try {
+    let targetObjId = roomObjectId || getStoredObjectId(roomId);
+    const targetName = `amour_room_v3_${roomId}`;
+    const payloadData = {
+      messages: messagesStore,
+      typing: typingData
+    };
+
+    if (targetObjId) {
+      await fetch(`${CLOUD_API_BASE}/${targetObjId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: targetName, data: payloadData })
+      });
+    } else {
+      const res = await fetch(CLOUD_API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: targetName, data: payloadData })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json && json.id) {
+          roomObjectId = json.id;
+          saveStoredObjectId(roomId, json.id);
+        }
+      }
+    }
+  } catch (e) {}
+}
+
 export async function clearRoomMessages(roomId) {
   messagesStore = [];
   saveLocalMessages(roomId, []);
@@ -365,18 +360,11 @@ export async function clearRoomMessages(roomId) {
     try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
   }
 
-  const topic = getTopicName(roomId);
-  fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-    method: 'POST',
-    body: JSON.stringify({ type: 'clear_chat' })
-  }).catch(() => {});
+  syncCloudRoomData(roomId);
 }
 
-/**
- * Update typing status for a user
- */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
-  const payload = { userId, userName, isTyping };
+  const payload = { userId, userName, isTyping, timestamp: Date.now() };
 
   if (broadcastChannel) {
     try {
@@ -384,22 +372,9 @@ export async function updateTypingState(roomId, userId, userName, isTyping) {
     } catch (e) {}
   }
 
-  // Fast typing broadcast over WSS / cloud
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: 'typing', payload }));
-  } else {
-    const topic = getTopicName(roomId);
-    fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-      method: 'POST',
-      body: JSON.stringify({ type: 'typing', payload }),
-      headers: { 'Cache-Control': 'no-cache' }
-    }).catch(() => {});
-  }
+  syncCloudRoomData(roomId, payload);
 }
 
-/**
- * Listen for typing partner in a room
- */
 export function listenToTyping(roomId, currentUserId, callback) {
   const handler = (payload) => {
     if (payload && payload.userId !== currentUserId) {
@@ -412,9 +387,6 @@ export function listenToTyping(roomId, currentUserId, callback) {
   };
 }
 
-/**
- * Add reaction to a message
- */
 export async function addReactionToMessage(roomId, messageId, emoji, userId) {
   const msg = messagesStore.find((m) => m.id === messageId);
   if (msg) {
@@ -432,19 +404,12 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
       } catch (e) {}
     }
 
-    const topic = getTopicName(roomId);
-    fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-      method: 'POST',
-      body: JSON.stringify({
-        type: 'add_reaction',
-        payload: { messageId, emoji, userId }
-      })
-    }).catch(() => {});
+    syncCloudRoomData(roomId);
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "NTFY-Realtime-Cloud-Active", databaseURL: "https://ntfy.sh" };
+  return { apiKey: "REST-Cloud-Engine-Active", databaseURL: CLOUD_API_BASE };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
