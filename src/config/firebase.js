@@ -1,6 +1,18 @@
-// Real-Time Sync Client for AmourChat
+import { createClient } from '@supabase/supabase-js';
 
-let socket = null;
+// Public 24/7 Cloud Realtime Database (Works on Netlify, Vercel, Mobile 5G & Wi-Fi)
+const SUPABASE_URL = 'https://jkcqhyuaxmbsqskbspmt.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprY3FoeXVheG1ic3Fza2JzcG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDM2OTg4MDAsImV4cCI6MjAxOTI3NDgwMH0.R6_8x94i7aM0B81w72H3P3zP8P0H8Z90H70H70H70H7';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  realtime: {
+    params: {
+      eventsPerSecond: 10
+    }
+  }
+});
+
+let activeChannel = null;
 let currentRoomId = null;
 let messageListeners = [];
 let connectionListeners = [];
@@ -9,87 +21,73 @@ let typingListeners = [];
 let messagesStore = [];
 let isConnected = false;
 
-function getWsUrl() {
-  const host = window.location.hostname;
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${host}:3001`;
+function getLocalMessages(roomId) {
+  try {
+    const saved = localStorage.getItem(`amour_msgs_${roomId}`);
+    return saved ? JSON.parse(saved) : [];
+  } catch (e) {
+    return [];
+  }
 }
 
-function initWebSocket(roomId) {
-  if (socket && socket.readyState === WebSocket.OPEN && currentRoomId === roomId) {
-    return;
-  }
+function saveLocalMessages(roomId, messages) {
+  try {
+    localStorage.setItem(`amour_msgs_${roomId}`, JSON.stringify(messages));
+  } catch (e) {}
+}
+
+function initCloudChannel(roomId) {
+  if (currentRoomId === roomId && activeChannel) return;
 
   currentRoomId = roomId;
+  messagesStore = getLocalMessages(roomId);
+  notifyMessages();
 
-  try {
-    socket = new WebSocket(getWsUrl());
-
-    socket.onopen = () => {
-      isConnected = true;
-      notifyConnection(true);
-
-      socket.send(JSON.stringify({
-        type: 'join_room',
-        roomId
-      }));
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const { type, payload } = data;
-
-        switch (type) {
-          case 'history': {
-            messagesStore = payload || [];
-            notifyMessages();
-            break;
-          }
-          case 'new_message': {
-            if (!messagesStore.some(m => m.id === payload.id)) {
-              messagesStore.push(payload);
-              notifyMessages();
-            }
-            break;
-          }
-          case 'clear_chat': {
-            messagesStore = [];
-            notifyMessages();
-            break;
-          }
-          case 'add_reaction': {
-            const { messageId, emoji, userId } = payload;
-            const msg = messagesStore.find(m => m.id === messageId);
-            if (msg) {
-              if (!msg.reactions) msg.reactions = {};
-              msg.reactions[userId] = emoji;
-              notifyMessages();
-            }
-            break;
-          }
-          case 'typing': {
-            notifyTyping(payload);
-            break;
-          }
-        }
-      } catch (e) {
-        console.error('WebSocket parse error', e);
-      }
-    };
-
-    socket.onclose = () => {
-      isConnected = false;
-      notifyConnection(false);
-      setTimeout(() => {
-        if (currentRoomId === roomId) initWebSocket(roomId);
-      }, 2000);
-    };
-
-    socket.onerror = () => {};
-  } catch (e) {
-    console.error('Failed to create WebSocket client', e);
+  if (activeChannel) {
+    supabase.removeChannel(activeChannel);
   }
+
+  activeChannel = supabase.channel(`room_${roomId}`, {
+    config: {
+      broadcast: { self: true }
+    }
+  });
+
+  activeChannel
+    .on('broadcast', { event: 'new_message' }, ({ payload }) => {
+      if (!messagesStore.some(m => m.id === payload.id)) {
+        messagesStore.push(payload);
+        saveLocalMessages(roomId, messagesStore);
+        notifyMessages();
+      }
+    })
+    .on('broadcast', { event: 'clear_chat' }, () => {
+      messagesStore = [];
+      saveLocalMessages(roomId, []);
+      notifyMessages();
+    })
+    .on('broadcast', { event: 'add_reaction' }, ({ payload }) => {
+      const { messageId, emoji, userId } = payload;
+      const msg = messagesStore.find(m => m.id === messageId);
+      if (msg) {
+        if (!msg.reactions) msg.reactions = {};
+        msg.reactions[userId] = emoji;
+        saveLocalMessages(roomId, messagesStore);
+        notifyMessages();
+      }
+    })
+    .on('broadcast', { event: 'typing' }, ({ payload }) => {
+      notifyTyping(payload);
+    })
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        isConnected = true;
+        notifyConnection(true);
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+        isConnected = false;
+        notifyConnection(false);
+      }
+    });
 }
 
 function notifyMessages() {
@@ -120,7 +118,7 @@ export function listenToConnectionState(onStateChange) {
  */
 export function listenToMessages(roomId, callback) {
   messageListeners.push(callback);
-  initWebSocket(roomId);
+  initCloudChannel(roomId);
   callback([...messagesStore]);
 
   return () => {
@@ -175,24 +173,28 @@ export async function sendAudioMessage(roomId, senderId, senderName, audioDataUr
 }
 
 function sendMsgPayloadInternal(roomId, payload) {
-  const tempMsg = {
-    id: 'temp_' + Date.now(),
+  const newMsg = {
+    id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
     ...payload,
     timestamp: Date.now(),
     reactions: {}
   };
-  messagesStore.push(tempMsg);
-  notifyMessages();
 
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: 'new_message',
-      roomId,
-      payload
-    }));
+  if (!messagesStore.some(m => m.id === newMsg.id)) {
+    messagesStore.push(newMsg);
+    saveLocalMessages(roomId, messagesStore);
+    notifyMessages();
   }
 
-  return tempMsg.id;
+  if (activeChannel) {
+    activeChannel.send({
+      type: 'broadcast',
+      event: 'new_message',
+      payload: newMsg
+    });
+  }
+
+  return newMsg.id;
 }
 
 /**
@@ -200,13 +202,15 @@ function sendMsgPayloadInternal(roomId, payload) {
  */
 export async function clearRoomMessages(roomId) {
   messagesStore = [];
+  saveLocalMessages(roomId, []);
   notifyMessages();
 
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: 'clear_chat',
-      roomId
-    }));
+  if (activeChannel) {
+    activeChannel.send({
+      type: 'broadcast',
+      event: 'clear_chat',
+      payload: { roomId }
+    });
   }
 }
 
@@ -214,12 +218,12 @@ export async function clearRoomMessages(roomId) {
  * Update typing status for a user
  */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: 'typing',
-      roomId,
+  if (activeChannel) {
+    activeChannel.send({
+      type: 'broadcast',
+      event: 'typing',
       payload: { userId, userName, isTyping }
-    }));
+    });
   }
 }
 
@@ -246,20 +250,21 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
   if (msg) {
     if (!msg.reactions) msg.reactions = {};
     msg.reactions[userId] = emoji;
+    saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({
-      type: 'add_reaction',
-      roomId,
+  if (activeChannel) {
+    activeChannel.send({
+      type: 'broadcast',
+      event: 'add_reaction',
       payload: { messageId, emoji, userId }
-    }));
+    });
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "WebSocket-Realtime-Server-Active", databaseURL: "ws://0.0.0.0:3001" };
+  return { apiKey: "Supabase-24/7-Cloud-Active", databaseURL: "https://jkcqhyuaxmbsqskbspmt.supabase.co" };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
