@@ -1,7 +1,24 @@
-// Bulletproof Per-Message Index & Append Realtime Engine for AmourChat
+// Official Google Firebase Realtime Database Engine for AmourChat
+
+import { initializeApp } from 'firebase/app';
+import { getDatabase, ref, set, push, onValue, off, remove } from 'firebase/database';
+
+export const firebaseConfig = {
+  apiKey: "AIzaSyBc12trS-bPUSlnTXVnLo0pwrxnrAaYaEE",
+  authDomain: "chat-e751a.firebaseapp.com",
+  databaseURL: "https://chat-e751a-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "chat-e751a",
+  storageBucket: "chat-e751a.firebasestorage.app",
+  messagingSenderId: "648075806315",
+  appId: "1:648075806315:web:7c8c3033d349871823d32e"
+};
+
+const app = initializeApp(firebaseConfig);
+export const db = getDatabase(app);
 
 let currentRoomId = null;
-let roomIndexObjectId = null;
+let messagesRef = null;
+let typingRef = null;
 
 let messageListeners = [];
 let connectionListeners = [];
@@ -9,8 +26,8 @@ let typingListeners = [];
 
 let messagesStore = [];
 let isConnected = true;
-
-const CLOUD_API_BASE = 'https://api.restful-api.dev/objects';
+let typingTimeoutTimer = null;
+let broadcastChannel = null;
 
 function getLocalMessages(roomId) {
   try {
@@ -26,20 +43,6 @@ function saveLocalMessages(roomId, messages) {
     localStorage.setItem(`amour_msgs_${roomId}`, JSON.stringify(messages));
   } catch (e) {}
 }
-
-function getStoredIndexObjId(roomId) {
-  return localStorage.getItem(`amour_idx_obj_${roomId}`) || null;
-}
-
-function saveStoredIndexObjId(roomId, objId) {
-  if (objId) {
-    localStorage.setItem(`amour_idx_obj_${roomId}`, objId);
-  }
-}
-
-let syncIntervalTimer = null;
-let broadcastChannel = null;
-let typingTimeoutTimer = null;
 
 /**
  * Free cloud file uploader for photos & voice notes
@@ -67,7 +70,6 @@ async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
 
 function initSync(roomId) {
   currentRoomId = roomId;
-  roomIndexObjectId = getStoredIndexObjId(roomId);
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
   notifyConnection(true);
@@ -82,111 +84,70 @@ function initSync(roomId) {
     };
   }
 
-  // 2. Initial cloud fetch
-  fetchCloudMessages(roomId);
+  // 2. Detach previous Firebase listeners
+  if (messagesRef) off(messagesRef);
+  if (typingRef) off(typingRef);
 
-  // 3. Fast high-frequency polling (800ms) over HTTPS (Port 443) - works 100% on 5G & Wi-Fi
-  if (syncIntervalTimer) clearInterval(syncIntervalTimer);
-  syncIntervalTimer = setInterval(() => {
-    fetchCloudMessages(roomId);
-  }, 800);
-}
-
-async function getOrFindRoomIndexObj(roomId) {
   const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const indexName = `amour_idx_v4_${cleanRoomId}`;
 
-  let targetId = roomIndexObjectId || getStoredIndexObjId(roomId);
-  if (targetId) {
-    const res = await fetch(`${CLOUD_API_BASE}/${targetId}`);
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.data) return { id: targetId, data: json.data };
-    }
-  }
+  // 3. Listen to Firebase Realtime Database Messages
+  messagesRef = ref(db, `rooms/${cleanRoomId}/messages`);
+  onValue(messagesRef, (snapshot) => {
+    const data = snapshot.val();
+    if (data) {
+      const cloudMsgList = Object.entries(data).map(([key, val]) => ({
+        _firebaseKey: key,
+        ...val
+      }));
 
-  // Search if index object exists
-  const searchRes = await fetch(CLOUD_API_BASE);
-  if (searchRes.ok) {
-    const all = await searchRes.json();
-    const found = all.find((o) => o.name === indexName);
-    if (found) {
-      roomIndexObjectId = found.id;
-      saveStoredIndexObjId(roomId, found.id);
-      return { id: found.id, data: found.data || {} };
-    }
-  }
-
-  // Create new index object if not found
-  const createRes = await fetch(CLOUD_API_BASE, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: indexName, data: { msgItemIds: [], typing: null } })
-  });
-  if (createRes.ok) {
-    const created = await createRes.json();
-    if (created && created.id) {
-      roomIndexObjectId = created.id;
-      saveStoredIndexObjId(roomId, created.id);
-      return { id: created.id, data: { msgItemIds: [], typing: null } };
-    }
-  }
-
-  return null;
-}
-
-async function fetchCloudMessages(roomId) {
-  try {
-    const indexObj = await getOrFindRoomIndexObj(roomId);
-    if (!indexObj || !indexObj.data) return;
-
-    const { msgItemIds, typing } = indexObj.data;
-
-    // 1. Check for missing message items
-    if (Array.isArray(msgItemIds) && msgItemIds.length > 0) {
-      // Find item IDs not yet loaded locally
-      const missingItemIds = msgItemIds.filter((itemId) => !messagesStore.some((m) => m._cloudItemId === itemId));
-
-      if (missingItemIds.length > 0) {
-        // Batch fetch missing message objects (up to 10 at a time)
-        const batchIds = missingItemIds.slice(-10);
-        const queryParams = batchIds.map((id) => `id=${id}`).join('&');
-        const batchRes = await fetch(`${CLOUD_API_BASE}?${queryParams}`);
-        if (batchRes.ok) {
-          const batchItems = await batchRes.json();
-          let updated = false;
-          batchItems.forEach((item) => {
-            if (item && item.data && item.data.id) {
-              const msg = { ...item.data, _cloudItemId: item.id };
-              if (!messagesStore.some((m) => m.id === msg.id)) {
-                messagesStore.push(msg);
-                updated = true;
-              }
-            }
-          });
-
-          if (updated) {
-            messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-            saveLocalMessages(roomId, messagesStore);
-            notifyMessages();
+      let updated = false;
+      cloudMsgList.forEach((cloudMsg) => {
+        const existingIndex = messagesStore.findIndex((m) => m.id === cloudMsg.id);
+        if (existingIndex === -1) {
+          messagesStore.push(cloudMsg);
+          updated = true;
+        } else {
+          // Sync reactions & firebase key
+          messagesStore[existingIndex]._firebaseKey = cloudMsg._firebaseKey;
+          if (JSON.stringify(messagesStore[existingIndex].reactions) !== JSON.stringify(cloudMsg.reactions)) {
+            messagesStore[existingIndex].reactions = cloudMsg.reactions;
+            updated = true;
           }
         }
-      }
-    }
+      });
 
-    // 2. Process Typing Status
-    if (typing) {
-      const { userId, userName, isTyping, timestamp } = typing;
-      const myUserId = localStorage.getItem('amour_user_id');
-      if (userId !== myUserId) {
-        if (isTyping && Date.now() - (timestamp || 0) < 4000) {
-          notifyTyping({ userId, userName, isTyping: true });
-        } else {
-          notifyTyping({ userId, userName, isTyping: false });
-        }
+      if (updated) {
+        messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        saveLocalMessages(roomId, messagesStore);
+        notifyMessages();
+      }
+    } else {
+      if (messagesStore.length === 0) {
+        notifyMessages();
       }
     }
-  } catch (e) {}
+  }, (err) => {
+    console.warn('Firebase DB listener warning:', err.message);
+  });
+
+  // 4. Listen to Firebase Realtime Database Typing Status
+  typingRef = ref(db, `rooms/${cleanRoomId}/typing`);
+  onValue(typingRef, (snapshot) => {
+    const data = snapshot.val();
+    if (data) {
+      const myUserId = localStorage.getItem('amour_user_id');
+      Object.entries(data).forEach(([userId, typingObj]) => {
+        if (userId !== myUserId && typingObj) {
+          const { userName, isTyping, timestamp } = typingObj;
+          if (isTyping && Date.now() - (timestamp || 0) < 4000) {
+            notifyTyping({ userId, userName, isTyping: true });
+          } else {
+            notifyTyping({ userId, userName, isTyping: false });
+          }
+        }
+      });
+    }
+  });
 }
 
 function handleLocalPayload(type, payload) {
@@ -324,52 +285,28 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Local Render (<1ms)
+  // 1. Optimistic Render (<1ms)
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. BroadcastChannel for same-device tabs (0ms)
+  // 2. Multi-tab BroadcastChannel
   if (broadcastChannel) {
     try {
       broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
     } catch (e) {}
   }
 
-  // 3. Post single lightweight message object (<200 bytes) to Cloud
+  // 3. Push message to Official Firebase Realtime Database
   try {
     const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const itemRes = await fetch(CLOUD_API_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: `amour_msg_${cleanRoomId}`, data: newMsg })
-    });
-
-    if (itemRes.ok) {
-      const itemObj = await itemRes.json();
-      if (itemObj && itemObj.id) {
-        newMsg._cloudItemId = itemObj.id;
-        // Append item ID to room index object
-        const indexObj = await getOrFindRoomIndexObj(roomId);
-        if (indexObj && indexObj.id) {
-          const currentItemIds = Array.isArray(indexObj.data.msgItemIds) ? indexObj.data.msgItemIds : [];
-          if (!currentItemIds.includes(itemObj.id)) {
-            currentItemIds.push(itemObj.id);
-            await fetch(`${CLOUD_API_BASE}/${indexObj.id}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                name: `amour_idx_v4_${cleanRoomId}`,
-                data: { ...indexObj.data, msgItemIds: currentItemIds }
-              })
-            });
-          }
-        }
-      }
-    }
-  } catch (e) {}
+    const roomMsgsRef = ref(db, `rooms/${cleanRoomId}/messages`);
+    await push(roomMsgsRef, newMsg);
+  } catch (e) {
+    console.error('Firebase DB Push error:', e);
+  }
 
   return msgId;
 }
@@ -384,15 +321,8 @@ export async function clearRoomMessages(roomId) {
   }
 
   try {
-    const indexObj = await getOrFindRoomIndexObj(roomId);
-    if (indexObj && indexObj.id) {
-      const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      await fetch(`${CLOUD_API_BASE}/${indexObj.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `amour_idx_v4_${cleanRoomId}`, data: { msgItemIds: [], typing: null } })
-      });
-    }
+    const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    await remove(ref(db, `rooms/${cleanRoomId}/messages`));
   } catch (e) {}
 }
 
@@ -406,18 +336,8 @@ export async function updateTypingState(roomId, userId, userName, isTyping) {
   }
 
   try {
-    const indexObj = await getOrFindRoomIndexObj(roomId);
-    if (indexObj && indexObj.id) {
-      const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      await fetch(`${CLOUD_API_BASE}/${indexObj.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: `amour_idx_v4_${cleanRoomId}`,
-          data: { ...indexObj.data, typing: payload }
-        })
-      });
-    }
+    const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    await set(ref(db, `rooms/${cleanRoomId}/typing/${userId}`), payload);
   } catch (e) {}
 }
 
@@ -449,11 +369,18 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
         });
       } catch (e) {}
     }
+
+    try {
+      const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (msg._firebaseKey) {
+        await set(ref(db, `rooms/${cleanRoomId}/messages/${msg._firebaseKey}/reactions/${userId}`), emoji);
+      }
+    } catch (e) {}
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "AppendIndex-Cloud-Engine-Active", databaseURL: CLOUD_API_BASE };
+  return firebaseConfig;
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
