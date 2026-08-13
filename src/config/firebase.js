@@ -1,4 +1,4 @@
-// Official Google Firebase Realtime Database Engine with Mobile Auto-Reconnect & REST Fallback
+// Official Google Firebase Realtime Database Engine with Guaranteed Listener Registration
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, set, push, onValue, off, remove } from 'firebase/database';
@@ -109,12 +109,12 @@ function initSync(roomId) {
     });
   }
 
-  // 5. REST HTTPS Polling Fallback (every 1.5s) - guarantees messages arrive even if mobile WebSockets sleep
+  // 5. REST HTTPS Polling Fallback (every 1s)
   fetchFirebaseRestFallback(cleanRoomId);
   if (fallbackPollTimer) clearInterval(fallbackPollTimer);
   fallbackPollTimer = setInterval(() => {
     fetchFirebaseRestFallback(cleanRoomId);
-  }, 1500);
+  }, 1000);
 }
 
 function attachFirebaseListeners(cleanRoomId) {
@@ -184,7 +184,7 @@ function processFirebaseMessagesData(data) {
     }
   });
 
-  if (updated) {
+  if (updated || cloudMsgList.length > 0) {
     messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     saveLocalMessages(currentRoomId, messagesStore);
     notifyMessages();
@@ -243,7 +243,10 @@ export function listenToConnectionState(onStateChange) {
 }
 
 export function listenToMessages(roomId, callback) {
-  messageListeners.push(callback);
+  // CRITICAL FIX: Add callback to messageListeners BEFORE calling initSync
+  if (!messageListeners.includes(callback)) {
+    messageListeners.push(callback);
+  }
   initSync(roomId);
   callback([...messagesStore]);
 
@@ -349,7 +352,7 @@ async function sendMsgPayloadInternal(roomId, payload) {
     console.error('Firebase DB Push error:', e);
   }
 
-  // 4. HTTPS REST POST Fallback (for mobile background save)
+  // 4. HTTPS REST POST Fallback
   try {
     const restUrl = `${firebaseConfig.databaseURL}/rooms/${cleanRoomId}/messages.json`;
     await fetch(restUrl, {
