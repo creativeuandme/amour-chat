@@ -1,26 +1,16 @@
-import { createClient } from '@supabase/supabase-js';
+// Global Public Real-Time Cloud Sync Engine (Powered by PieSocket & LocalStorage)
 
-// Public 24/7 Cloud Realtime Database Endpoint
-const SUPABASE_URL = 'https://jkcqhyuaxmbsqskbspmt.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprY3FoeXVheG1ic3Fza2JzcG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDM2OTg4MDAsImV4cCI6MjAxOTI3NDgwMH0.R6_8x94i7aM0B81w72H3P3zP8P0H8Z90H70H70H70H7';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  realtime: {
-    params: {
-      eventsPerSecond: 20
-    }
-  }
-});
-
-let activeChannel = null;
-let broadcastChannel = null;
+let socket = null;
 let currentRoomId = null;
 let messageListeners = [];
 let connectionListeners = [];
 let typingListeners = [];
 
 let messagesStore = [];
-let isConnected = true; // Connected by default
+let isConnected = false;
+
+// Free public WebSocket API Key for instant cross-device real-time sync
+const PIESOCKET_API_KEY = 'VCXvic32ipGOHXC4wWqqYTGAY4UdRIWUAQqaNzQM';
 
 function getLocalMessages(roomId) {
   try {
@@ -37,68 +27,124 @@ function saveLocalMessages(roomId, messages) {
   } catch (e) {}
 }
 
-function initChannels(roomId) {
-  if (currentRoomId === roomId && activeChannel) return;
+function initCloudWebSocket(roomId) {
+  if (currentRoomId === roomId && socket && socket.readyState === WebSocket.OPEN) {
+    return;
+  }
 
   currentRoomId = roomId;
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
-  notifyConnection(true);
 
-  // 1. Local Browser BroadcastChannel (for instant multi-tab sync)
-  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-    if (broadcastChannel) broadcastChannel.close();
-    broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
-    broadcastChannel.onmessage = (event) => {
-      const { type, payload } = event.data;
-      handleIncomingData(type, payload);
+  if (socket) {
+    try { socket.close(); } catch (e) {}
+  }
+
+  // Connect to PieSocket global real-time cloud server
+  const wsUrl = `wss://free.piesocket.com/v3/${roomId}?api_key=${PIESOCKET_API_KEY}&notify_self=1`;
+
+  try {
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+      console.log('⚡ Connected to Global Cloud Realtime Channel for room:', roomId);
+      isConnected = true;
+      notifyConnection(true);
+
+      // Broadcast history request so partner can sync if missing messages
+      socket.send(JSON.stringify({
+        type: 'request_sync',
+        roomId
+      }));
     };
-  }
 
-  // 2. Supabase Cloud Realtime Channel (for 24/7 cross-device network sync)
-  if (activeChannel) {
-    supabase.removeChannel(activeChannel);
-  }
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const { type, payload } = data;
 
-  activeChannel = supabase.channel(`room_${roomId}`, {
-    config: {
-      broadcast: { self: true }
-    }
-  });
-
-  activeChannel
-    .on('broadcast', { event: 'new_message' }, ({ payload }) => handleIncomingData('new_message', payload))
-    .on('broadcast', { event: 'clear_chat' }, () => handleIncomingData('clear_chat'))
-    .on('broadcast', { event: 'add_reaction' }, ({ payload }) => handleIncomingData('add_reaction', payload))
-    .on('broadcast', { event: 'typing' }, ({ payload }) => notifyTyping(payload))
-    .subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        isConnected = true;
-        notifyConnection(true);
+        switch (type) {
+          case 'new_message': {
+            if (payload && !messagesStore.some(m => m.id === payload.id)) {
+              messagesStore.push(payload);
+              saveLocalMessages(roomId, messagesStore);
+              notifyMessages();
+            }
+            break;
+          }
+          case 'request_sync': {
+            // Share local messages with newly connected partner
+            if (messagesStore.length > 0) {
+              socket.send(JSON.stringify({
+                type: 'sync_history',
+                roomId,
+                payload: messagesStore
+              }));
+            }
+            break;
+          }
+          case 'sync_history': {
+            if (Array.isArray(payload)) {
+              let updated = false;
+              payload.forEach(msg => {
+                if (!messagesStore.some(m => m.id === msg.id)) {
+                  messagesStore.push(msg);
+                  updated = true;
+                }
+              });
+              if (updated) {
+                messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                saveLocalMessages(roomId, messagesStore);
+                notifyMessages();
+              }
+            }
+            break;
+          }
+          case 'clear_chat': {
+            messagesStore = [];
+            saveLocalMessages(roomId, []);
+            notifyMessages();
+            break;
+          }
+          case 'add_reaction': {
+            if (payload) {
+              const { messageId, emoji, userId } = payload;
+              const msg = messagesStore.find(m => m.id === messageId);
+              if (msg) {
+                if (!msg.reactions) msg.reactions = {};
+                msg.reactions[userId] = emoji;
+                saveLocalMessages(roomId, messagesStore);
+                notifyMessages();
+              }
+            }
+            break;
+          }
+          case 'typing': {
+            if (payload) {
+              notifyTyping(payload);
+            }
+            break;
+          }
+        }
+      } catch (e) {
+        console.error('Error parsing cloud WebSocket message', e);
       }
-    });
-}
+    };
 
-function handleIncomingData(type, payload) {
-  if (type === 'new_message' && payload) {
-    if (!messagesStore.some(m => m.id === payload.id)) {
-      messagesStore.push(payload);
-      saveLocalMessages(currentRoomId, messagesStore);
-      notifyMessages();
-    }
-  } else if (type === 'clear_chat') {
-    messagesStore = [];
-    saveLocalMessages(currentRoomId, []);
-    notifyMessages();
-  } else if (type === 'add_reaction' && payload) {
-    const { messageId, emoji, userId } = payload;
-    const msg = messagesStore.find(m => m.id === messageId);
-    if (msg) {
-      if (!msg.reactions) msg.reactions = {};
-      msg.reactions[userId] = emoji;
-      saveLocalMessages(currentRoomId, messagesStore);
-      notifyMessages();
-    }
+    socket.onclose = () => {
+      isConnected = false;
+      notifyConnection(false);
+      // Auto reconnect after 2s
+      setTimeout(() => {
+        if (currentRoomId === roomId) initCloudWebSocket(roomId);
+      }, 2000);
+    };
+
+    socket.onerror = (err) => {
+      console.warn('Cloud WebSocket error:', err);
+    };
+  } catch (e) {
+    console.error('Failed to create PieSocket Cloud WebSocket', e);
   }
 }
 
@@ -119,7 +165,7 @@ function notifyTyping(payload) {
  */
 export function listenToConnectionState(onStateChange) {
   connectionListeners.push(onStateChange);
-  onStateChange(true); // Always report connected immediately
+  onStateChange(isConnected);
   return () => {
     connectionListeners = connectionListeners.filter(fn => fn !== onStateChange);
   };
@@ -130,7 +176,7 @@ export function listenToConnectionState(onStateChange) {
  */
 export function listenToMessages(roomId, callback) {
   messageListeners.push(callback);
-  initChannels(roomId);
+  initCloudWebSocket(roomId);
   callback([...messagesStore]);
 
   return () => {
@@ -198,20 +244,12 @@ function sendMsgPayloadInternal(roomId, payload) {
     notifyMessages();
   }
 
-  // Send to Local BroadcastChannel
-  if (broadcastChannel) {
-    try {
-      broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
-    } catch (e) {}
-  }
-
-  // Send to Cloud Supabase Realtime
-  if (activeChannel) {
-    activeChannel.send({
-      type: 'broadcast',
-      event: 'new_message',
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'new_message',
+      roomId,
       payload: newMsg
-    });
+    }));
   }
 
   return newMsg.id;
@@ -225,16 +263,11 @@ export async function clearRoomMessages(roomId) {
   saveLocalMessages(roomId, []);
   notifyMessages();
 
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
-  }
-
-  if (activeChannel) {
-    activeChannel.send({
-      type: 'broadcast',
-      event: 'clear_chat',
-      payload: { roomId }
-    });
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'clear_chat',
+      roomId
+    }));
   }
 }
 
@@ -242,15 +275,12 @@ export async function clearRoomMessages(roomId) {
  * Update typing status for a user
  */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'typing', payload: { userId, userName, isTyping } }); } catch (e) {}
-  }
-  if (activeChannel) {
-    activeChannel.send({
-      type: 'broadcast',
-      event: 'typing',
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'typing',
+      roomId,
       payload: { userId, userName, isTyping }
-    });
+    }));
   }
 }
 
@@ -281,21 +311,17 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     notifyMessages();
   }
 
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'add_reaction', payload: { messageId, emoji, userId } }); } catch (e) {}
-  }
-
-  if (activeChannel) {
-    activeChannel.send({
-      type: 'broadcast',
-      event: 'add_reaction',
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: 'add_reaction',
+      roomId,
       payload: { messageId, emoji, userId }
-    });
+    }));
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "Cloud-Realtime-Active", databaseURL: "https://jkcqhyuaxmbsqskbspmt.supabase.co" };
+  return { apiKey: "PieSocket-Global-Cloud-WSS", databaseURL: "wss://free.piesocket.com" };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
