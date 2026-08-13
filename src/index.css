@@ -1,0 +1,248 @@
+/* Custom Romantic Design System */
+:root {
+  --font-heading: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* Color Palette - Light Romantic Theme */
+  --bg-gradient-start: #fff0f3;
+  --bg-gradient-mid: #ffccd5;
+  --bg-gradient-end: #ffb3c1;
+  --app-bg: #fff5f7;
+
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(255, 182, 193, 0.4);
+  --glass-shadow: 0 8px 32px 0 rgba(230, 57, 70, 0.08);
+
+  --text-main: #2b0d16;
+  --text-muted: #804a58;
+  --text-light: #663344;
+
+  --primary-rose: #e63946;
+  --primary-rose-hover: #d62839;
+  --primary-light: #ff758f;
+  --accent-blush: #ffb3c1;
+  
+  --bubble-me-bg: linear-gradient(135deg, #ff4d6d 0%, #c9184a 100%);
+  --bubble-me-text: #ffffff;
+  
+  --bubble-partner-bg: rgba(255, 255, 255, 0.9);
+  --bubble-partner-text: #2b0d16;
+  --bubble-partner-border: rgba(255, 182, 193, 0.5);
+
+  --online-green: #10b981;
+  --reconnecting-orange: #f59e0b;
+  --offline-red: #ef4444;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+}
+
+[data-theme='dark'] {
+  --bg-gradient-start: #1a0910;
+  --bg-gradient-mid: #2d0c1a;
+  --bg-gradient-end: #12040a;
+  --app-bg: #14070d;
+
+  --glass-bg: rgba(36, 14, 24, 0.85);
+  --glass-border: rgba(230, 57, 70, 0.25);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+
+  --text-main: #fff0f3;
+  --text-muted: #cca3b0;
+  --text-light: #e6b8c6;
+
+  --bubble-me-bg: linear-gradient(135deg, #ff4d6d 0%, #a4133c 100%);
+  --bubble-me-text: #ffffff;
+  
+  --bubble-partner-bg: rgba(50, 20, 34, 0.85);
+  --bubble-partner-text: #fff0f3;
+  --bubble-partner-border: rgba(255, 117, 143, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: var(--font-body);
+  background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-mid), var(--bg-gradient-end));
+  color: var(--text-main);
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* Glassmorphic Container */
+.chat-app-container {
+  width: 100%;
+  max-width: 900px;
+  height: 100%;
+  max-height: 950px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+@media (min-width: 768px) {
+  .chat-app-container {
+    height: 92vh;
+    border-radius: var(--radius-lg);
+  }
+}
+
+/* Floating Heart Sparkles Background */
+.bg-sparkles {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.heart-particle {
+  position: absolute;
+  color: rgba(230, 57, 70, 0.15);
+  animation: floatHeart 12s infinite linear;
+  user-select: none;
+}
+
+@keyframes floatHeart {
+  0% {
+    transform: translateY(100vh) scale(0.5) rotate(0deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.6;
+  }
+  80% {
+    opacity: 0.6;
+  }
+  100% {
+    transform: translateY(-10vh) scale(1.2) rotate(360deg);
+    opacity: 0;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(230, 57, 70, 0.25);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(230, 57, 70, 0.45);
+}
+
+/* Buttons & Inputs reset */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  background: none;
+  transition: all 0.2s ease;
+}
+
+input, textarea {
+  font-family: inherit;
+  outline: none;
+  border: none;
+}
+
+/* Toast Notifications */
+.toast-banner {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(230, 57, 70, 0.95);
+  color: white;
+  padding: 8px 18px;
+  border-radius: var(--radius-full);
+  font-size: 0.85rem;
+  font-weight: 500;
+  box-shadow: 0 4px 15px rgba(230, 57, 70, 0.3);
+  z-index: 50;
+  animation: slideDown 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Modal Overlay */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(20, 7, 13, 0.65);
+  backdrop-filter: blur(8px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 100;
+  padding: 16px;
+  animation: fadeIn 0.2s ease;
+}
+
+.modal-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  width: 100%;
+  max-width: 440px;
+  color: var(--text-main);
+  animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes popIn {
+  from { transform: scale(0.9) translateY(10px); opacity: 0; }
+  to { transform: scale(1) translateY(0); opacity: 1; }
+}

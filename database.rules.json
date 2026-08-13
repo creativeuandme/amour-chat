@@ -1,0 +1,19 @@
+{
+  "rules": {
+    "rooms": {
+      "$roomId": {
+        // Room-level access: Anyone with the exact room ID URL can read & write messages in that room
+        ".read": "true",
+        ".write": "true",
+        "messages": {
+          "$messageId": {
+            ".validate": "newData.hasChildren(['senderId', 'senderName', 'text', 'timestamp'])",
+            "text": {
+              ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 5000"
+            }
+          }
+        }
+      }
+    }
+  }
+}
