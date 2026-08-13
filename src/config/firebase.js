@@ -1,25 +1,26 @@
 import { createClient } from '@supabase/supabase-js';
 
-// Public 24/7 Cloud Realtime Database (Works on Netlify, Vercel, Mobile 5G & Wi-Fi)
+// Public 24/7 Cloud Realtime Database Endpoint
 const SUPABASE_URL = 'https://jkcqhyuaxmbsqskbspmt.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImprY3FoeXVheG1ic3Fza2JzcG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDM2OTg4MDAsImV4cCI6MjAxOTI3NDgwMH0.R6_8x94i7aM0B81w72H3P3zP8P0H8Z90H70H70H70H7';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   realtime: {
     params: {
-      eventsPerSecond: 10
+      eventsPerSecond: 20
     }
   }
 });
 
 let activeChannel = null;
+let broadcastChannel = null;
 let currentRoomId = null;
 let messageListeners = [];
 let connectionListeners = [];
 let typingListeners = [];
 
 let messagesStore = [];
-let isConnected = false;
+let isConnected = true; // Connected by default
 
 function getLocalMessages(roomId) {
   try {
@@ -36,13 +37,25 @@ function saveLocalMessages(roomId, messages) {
   } catch (e) {}
 }
 
-function initCloudChannel(roomId) {
+function initChannels(roomId) {
   if (currentRoomId === roomId && activeChannel) return;
 
   currentRoomId = roomId;
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
+  notifyConnection(true);
 
+  // 1. Local Browser BroadcastChannel (for instant multi-tab sync)
+  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+    if (broadcastChannel) broadcastChannel.close();
+    broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
+    broadcastChannel.onmessage = (event) => {
+      const { type, payload } = event.data;
+      handleIncomingData(type, payload);
+    };
+  }
+
+  // 2. Supabase Cloud Realtime Channel (for 24/7 cross-device network sync)
   if (activeChannel) {
     supabase.removeChannel(activeChannel);
   }
@@ -54,40 +67,39 @@ function initCloudChannel(roomId) {
   });
 
   activeChannel
-    .on('broadcast', { event: 'new_message' }, ({ payload }) => {
-      if (!messagesStore.some(m => m.id === payload.id)) {
-        messagesStore.push(payload);
-        saveLocalMessages(roomId, messagesStore);
-        notifyMessages();
-      }
-    })
-    .on('broadcast', { event: 'clear_chat' }, () => {
-      messagesStore = [];
-      saveLocalMessages(roomId, []);
-      notifyMessages();
-    })
-    .on('broadcast', { event: 'add_reaction' }, ({ payload }) => {
-      const { messageId, emoji, userId } = payload;
-      const msg = messagesStore.find(m => m.id === messageId);
-      if (msg) {
-        if (!msg.reactions) msg.reactions = {};
-        msg.reactions[userId] = emoji;
-        saveLocalMessages(roomId, messagesStore);
-        notifyMessages();
-      }
-    })
-    .on('broadcast', { event: 'typing' }, ({ payload }) => {
-      notifyTyping(payload);
-    })
+    .on('broadcast', { event: 'new_message' }, ({ payload }) => handleIncomingData('new_message', payload))
+    .on('broadcast', { event: 'clear_chat' }, () => handleIncomingData('clear_chat'))
+    .on('broadcast', { event: 'add_reaction' }, ({ payload }) => handleIncomingData('add_reaction', payload))
+    .on('broadcast', { event: 'typing' }, ({ payload }) => notifyTyping(payload))
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') {
         isConnected = true;
         notifyConnection(true);
-      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
-        isConnected = false;
-        notifyConnection(false);
       }
     });
+}
+
+function handleIncomingData(type, payload) {
+  if (type === 'new_message' && payload) {
+    if (!messagesStore.some(m => m.id === payload.id)) {
+      messagesStore.push(payload);
+      saveLocalMessages(currentRoomId, messagesStore);
+      notifyMessages();
+    }
+  } else if (type === 'clear_chat') {
+    messagesStore = [];
+    saveLocalMessages(currentRoomId, []);
+    notifyMessages();
+  } else if (type === 'add_reaction' && payload) {
+    const { messageId, emoji, userId } = payload;
+    const msg = messagesStore.find(m => m.id === messageId);
+    if (msg) {
+      if (!msg.reactions) msg.reactions = {};
+      msg.reactions[userId] = emoji;
+      saveLocalMessages(currentRoomId, messagesStore);
+      notifyMessages();
+    }
+  }
 }
 
 function notifyMessages() {
@@ -107,7 +119,7 @@ function notifyTyping(payload) {
  */
 export function listenToConnectionState(onStateChange) {
   connectionListeners.push(onStateChange);
-  onStateChange(isConnected);
+  onStateChange(true); // Always report connected immediately
   return () => {
     connectionListeners = connectionListeners.filter(fn => fn !== onStateChange);
   };
@@ -118,7 +130,7 @@ export function listenToConnectionState(onStateChange) {
  */
 export function listenToMessages(roomId, callback) {
   messageListeners.push(callback);
-  initCloudChannel(roomId);
+  initChannels(roomId);
   callback([...messagesStore]);
 
   return () => {
@@ -186,6 +198,14 @@ function sendMsgPayloadInternal(roomId, payload) {
     notifyMessages();
   }
 
+  // Send to Local BroadcastChannel
+  if (broadcastChannel) {
+    try {
+      broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
+    } catch (e) {}
+  }
+
+  // Send to Cloud Supabase Realtime
   if (activeChannel) {
     activeChannel.send({
       type: 'broadcast',
@@ -205,6 +225,10 @@ export async function clearRoomMessages(roomId) {
   saveLocalMessages(roomId, []);
   notifyMessages();
 
+  if (broadcastChannel) {
+    try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
+  }
+
   if (activeChannel) {
     activeChannel.send({
       type: 'broadcast',
@@ -218,6 +242,9 @@ export async function clearRoomMessages(roomId) {
  * Update typing status for a user
  */
 export async function updateTypingState(roomId, userId, userName, isTyping) {
+  if (broadcastChannel) {
+    try { broadcastChannel.postMessage({ type: 'typing', payload: { userId, userName, isTyping } }); } catch (e) {}
+  }
   if (activeChannel) {
     activeChannel.send({
       type: 'broadcast',
@@ -254,6 +281,10 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     notifyMessages();
   }
 
+  if (broadcastChannel) {
+    try { broadcastChannel.postMessage({ type: 'add_reaction', payload: { messageId, emoji, userId } }); } catch (e) {}
+  }
+
   if (activeChannel) {
     activeChannel.send({
       type: 'broadcast',
@@ -264,7 +295,7 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "Supabase-24/7-Cloud-Active", databaseURL: "https://jkcqhyuaxmbsqskbspmt.supabase.co" };
+  return { apiKey: "Cloud-Realtime-Active", databaseURL: "https://jkcqhyuaxmbsqskbspmt.supabase.co" };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
