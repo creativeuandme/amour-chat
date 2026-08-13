@@ -1,16 +1,24 @@
-// Bulletproof Zero-Loss Cloud Sync Engine for AmourChat
+// WebRTC Direct P2P & High-Availability Cloud Sync Engine for AmourChat
+
+import { Peer } from 'peerjs';
 
 let currentRoomId = null;
+let currentUserId = null;
+let peer = null;
+let peerConnections = new Map();
+
 let messageListeners = [];
 let connectionListeners = [];
 let typingListeners = [];
 
 let messagesStore = [];
-const isConnected = true;
+let isConnected = false;
 
-// Master Persistent Cloud Storage Endpoint
-const MASTER_CLOUD_ID = 'ff8081819ff5b110019ffbba67ba12ea';
-const CLOUD_API_URL = `https://api.restful-api.dev/objects/${MASTER_CLOUD_ID}`;
+let syncIntervalTimer = null;
+let broadcastChannel = null;
+let typingTimeoutTimer = null;
+
+const CLOUD_API_BASE = 'https://api.restful-api.dev/objects';
 
 function getLocalMessages(roomId) {
   try {
@@ -27,12 +35,17 @@ function saveLocalMessages(roomId, messages) {
   } catch (e) {}
 }
 
-let syncIntervalTimer = null;
-let broadcastChannel = null;
-let typingTimeoutTimer = null;
+function getStoredUserId() {
+  let uid = localStorage.getItem('amour_user_id');
+  if (!uid) {
+    uid = 'usr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+    localStorage.setItem('amour_user_id', uid);
+  }
+  return uid;
+}
 
 /**
- * Free media uploader for photos & voice notes
+ * Free cloud file uploader for photos & voice notes
  */
 async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
   try {
@@ -55,9 +68,6 @@ async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
   return null;
 }
 
-/**
- * Robust message array merger - eliminates race conditions & prevents message overwrites
- */
 function mergeMessageLists(listA, listB) {
   const mergedMap = new Map();
 
@@ -82,9 +92,9 @@ function mergeMessageLists(listA, listB) {
 
 function initSync(roomId) {
   currentRoomId = roomId;
+  currentUserId = getStoredUserId();
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
-  notifyConnection(true);
 
   // 1. Same-device multi-tab BroadcastChannel
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -92,56 +102,192 @@ function initSync(roomId) {
     broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
     broadcastChannel.onmessage = (event) => {
       const { type, payload } = event.data;
-      handleLocalPayload(type, payload);
+      handleIncomingPayload(type, payload);
     };
   }
 
-  // 2. Fetch cloud storage immediately
-  fetchCloudMessages(roomId);
+  // 2. Initialize PeerJS WebRTC P2P Direct Realtime Engine
+  initPeerJsEngine(roomId);
 
-  // 3. Fast cloud polling (800ms) for high-speed cross-device sync
+  // 3. Fallback Cloud Poll (1000ms) for initial connection & offline sync
+  fetchCloudMessages(roomId);
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
     fetchCloudMessages(roomId);
-  }, 800);
+  }, 1000);
+}
+
+function initPeerJsEngine(roomId) {
+  if (peer) {
+    try { peer.destroy(); } catch (e) {}
+  }
+
+  const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const peerId = `amour_${cleanRoomId}_${currentUserId.substring(4, 10)}`;
+
+  try {
+    peer = new Peer(peerId, {
+      debug: 0
+    });
+
+    peer.on('open', (id) => {
+      isConnected = true;
+      notifyConnection(true);
+      // Announce peer presence in room
+      syncPeerPresence(roomId, id);
+    });
+
+    peer.on('connection', (conn) => {
+      setupDataConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+      // Re-initialize peer on disconnect
+      setTimeout(() => {
+        if (currentRoomId === roomId) initPeerJsEngine(roomId);
+      }, 3000);
+    });
+  } catch (e) {}
+}
+
+function setupDataConnection(conn) {
+  peerConnections.set(conn.peer, conn);
+
+  conn.on('open', () => {
+    // Send local message history to newly connected peer
+    if (messagesStore.length > 0) {
+      conn.send({
+        type: 'sync_history',
+        payload: messagesStore
+      });
+    }
+  });
+
+  conn.on('data', (data) => {
+    if (data && data.type) {
+      if (data.type === 'sync_history' && Array.isArray(data.payload)) {
+        const merged = mergeMessageLists(messagesStore, data.payload);
+        if (JSON.stringify(merged) !== JSON.stringify(messagesStore)) {
+          messagesStore = merged;
+          saveLocalMessages(currentRoomId, messagesStore);
+          notifyMessages();
+        }
+      } else {
+        handleIncomingPayload(data.type, data.payload);
+      }
+    }
+  });
+
+  conn.on('close', () => {
+    peerConnections.delete(conn.peer);
+  });
+}
+
+async function syncPeerPresence(roomId, myPeerId) {
+  try {
+    // Announce peer ID to room cloud registry
+    const registryKey = `amour_reg_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const res = await fetch(`${CLOUD_API_BASE}`);
+    if (!res.ok) return;
+    const all = await res.json();
+    const found = all.find((o) => o.name === registryKey);
+
+    let activePeers = [];
+    if (found && found.data && Array.isArray(found.data.peers)) {
+      activePeers = found.data.peers.filter((p) => p.id !== myPeerId && Date.now() - p.ts < 15000);
+    }
+
+    // Connect to active peers in the same room
+    activePeers.forEach((p) => {
+      if (!peerConnections.has(p.id)) {
+        const conn = peer.connect(p.id);
+        setupDataConnection(conn);
+      }
+    });
+
+    // Update presence in registry
+    activePeers.push({ id: myPeerId, ts: Date.now() });
+    if (found) {
+      await fetch(`${CLOUD_API_BASE}/${found.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: registryKey, data: { peers: activePeers } })
+      });
+    } else {
+      await fetch(CLOUD_API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: registryKey, data: { peers: activePeers } })
+      });
+    }
+  } catch (e) {}
 }
 
 async function fetchCloudMessages(roomId) {
   try {
-    const res = await fetch(CLOUD_API_URL);
+    const roomKey = `amour_msgs_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const res = await fetch(CLOUD_API_BASE);
     if (!res.ok) return;
-    const json = await res.json();
-    if (!json || !json.data || !json.data.rooms) return;
+    const all = await res.json();
+    const found = all.find((o) => o.name === roomKey);
 
-    const roomData = json.data.rooms[roomId];
-    if (!roomData) return;
-
-    // 1. Merge Cloud Messages with Local Messages
-    if (Array.isArray(roomData.messages)) {
-      const merged = mergeMessageLists(messagesStore, roomData.messages);
-      if (JSON.stringify(merged) !== JSON.stringify(messagesStore)) {
-        messagesStore = merged;
-        saveLocalMessages(roomId, messagesStore);
-        notifyMessages();
+    if (found && found.data) {
+      if (Array.isArray(found.data.messages)) {
+        const merged = mergeMessageLists(messagesStore, found.data.messages);
+        if (JSON.stringify(merged) !== JSON.stringify(messagesStore)) {
+          messagesStore = merged;
+          saveLocalMessages(roomId, messagesStore);
+          notifyMessages();
+        }
       }
-    }
 
-    // 2. Process Typing Status
-    if (roomData.typing) {
-      const { userId, userName, isTyping, timestamp } = roomData.typing;
-      const currentUserId = localStorage.getItem('amour_user_id');
-      if (userId !== currentUserId) {
-        if (isTyping && Date.now() - (timestamp || 0) < 4000) {
-          notifyTyping({ userId, userName, isTyping: true });
-        } else {
-          notifyTyping({ userId, userName, isTyping: false });
+      if (found.data.typing) {
+        const { userId, userName, isTyping, timestamp } = found.data.typing;
+        if (userId !== currentUserId) {
+          if (isTyping && Date.now() - (timestamp || 0) < 4000) {
+            notifyTyping({ userId, userName, isTyping: true });
+          } else {
+            notifyTyping({ userId, userName, isTyping: false });
+          }
         }
       }
     }
   } catch (e) {}
 }
 
-function handleLocalPayload(type, payload) {
+async function syncCloudStorage(roomId, typingData = null) {
+  try {
+    const roomKey = `amour_msgs_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const res = await fetch(CLOUD_API_BASE);
+    if (!res.ok) return;
+    const all = await res.json();
+    const found = all.find((o) => o.name === roomKey);
+
+    const existingMsgs = found && found.data && Array.isArray(found.data.messages) ? found.data.messages : [];
+    const merged = mergeMessageLists(messagesStore, existingMsgs);
+
+    const payloadData = {
+      messages: merged,
+      typing: typingData
+    };
+
+    if (found) {
+      await fetch(`${CLOUD_API_BASE}/${found.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: roomKey, data: payloadData })
+      });
+    } else {
+      await fetch(CLOUD_API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: roomKey, data: payloadData })
+      });
+    }
+  } catch (e) {}
+}
+
+function handleIncomingPayload(type, payload) {
   if (type === 'new_message' && payload) {
     if (!messagesStore.some((m) => m.id === payload.id)) {
       messagesStore.push(payload);
@@ -163,6 +309,24 @@ function handleLocalPayload(type, payload) {
     }
   } else if (type === 'typing' && payload) {
     notifyTyping(payload);
+  }
+}
+
+function broadcastToPeers(type, payload) {
+  // Broadcast over WebRTC P2P DataChannels (<1ms)
+  peerConnections.forEach((conn) => {
+    if (conn && conn.open) {
+      try {
+        conn.send({ type, payload });
+      } catch (e) {}
+    }
+  });
+
+  // Broadcast over local tab BroadcastChannel
+  if (broadcastChannel) {
+    try {
+      broadcastChannel.postMessage({ type, payload });
+    } catch (e) {}
   }
 }
 
@@ -276,56 +440,20 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Local Render (<1ms)
+  // 1. Optimistic Render (<1ms)
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. BroadcastChannel (0ms)
-  if (broadcastChannel) {
-    try {
-      broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
-    } catch (e) {}
-  }
+  // 2. Direct P2P Broadcast over WebRTC DataChannel (<1ms)
+  broadcastToPeers('new_message', newMsg);
 
-  // 3. Save & Merge into Cloud Storage
-  syncCloudRoomData(roomId);
+  // 3. Cloud Storage Sync
+  syncCloudStorage(roomId);
 
   return msgId;
-}
-
-async function syncCloudRoomData(roomId, typingData = null) {
-  try {
-    const res = await fetch(CLOUD_API_URL);
-    let master = {};
-    if (res.ok) {
-      master = await res.json();
-    }
-
-    const data = master.data || {};
-    if (!data.rooms) data.rooms = {};
-
-    const existingRoomData = data.rooms[roomId] || {};
-    const mergedMessages = mergeMessageLists(messagesStore, existingRoomData.messages || []);
-
-    // Update local store with merged list
-    messagesStore = mergedMessages;
-    saveLocalMessages(roomId, messagesStore);
-    notifyMessages();
-
-    data.rooms[roomId] = {
-      messages: mergedMessages,
-      typing: typingData !== null ? typingData : existingRoomData.typing || null
-    };
-
-    await fetch(CLOUD_API_URL, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: 'amour_chat_master_v1', data })
-    });
-  } catch (e) {}
 }
 
 export async function clearRoomMessages(roomId) {
@@ -333,37 +461,15 @@ export async function clearRoomMessages(roomId) {
   saveLocalMessages(roomId, []);
   notifyMessages();
 
-  if (broadcastChannel) {
-    try { broadcastChannel.postMessage({ type: 'clear_chat' }); } catch (e) {}
-  }
-
-  try {
-    const res = await fetch(CLOUD_API_URL);
-    if (res.ok) {
-      const master = await res.json();
-      const data = master.data || {};
-      if (data.rooms && data.rooms[roomId]) {
-        data.rooms[roomId].messages = [];
-        await fetch(CLOUD_API_URL, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: 'amour_chat_master_v1', data })
-        });
-      }
-    }
-  } catch (e) {}
+  broadcastToPeers('clear_chat', null);
+  syncCloudStorage(roomId);
 }
 
 export async function updateTypingState(roomId, userId, userName, isTyping) {
   const payload = { userId, userName, isTyping, timestamp: Date.now() };
 
-  if (broadcastChannel) {
-    try {
-      broadcastChannel.postMessage({ type: 'typing', payload });
-    } catch (e) {}
-  }
-
-  syncCloudRoomData(roomId, payload);
+  broadcastToPeers('typing', payload);
+  syncCloudStorage(roomId, payload);
 }
 
 export function listenToTyping(roomId, currentUserId, callback) {
@@ -386,21 +492,13 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
 
-    if (broadcastChannel) {
-      try {
-        broadcastChannel.postMessage({
-          type: 'add_reaction',
-          payload: { messageId, emoji, userId }
-        });
-      } catch (e) {}
-    }
-
-    syncCloudRoomData(roomId);
+    broadcastToPeers('add_reaction', { messageId, emoji, userId });
+    syncCloudStorage(roomId);
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "Zero-Loss-Cloud-Active", databaseURL: CLOUD_API_URL };
+  return { apiKey: "WebRTC-P2P-Engine-Active", databaseURL: CLOUD_API_BASE };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
