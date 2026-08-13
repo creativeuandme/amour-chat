@@ -1,4 +1,4 @@
-// Ultra-Reliable 24/7 Global Realtime Engine for AmourChat (With Free Cloud Media Host & Typing Sync)
+// Ultra-Fast High-Performance Real-Time Engine for AmourChat
 
 let currentRoomId = null;
 let socket = null;
@@ -30,13 +30,14 @@ function saveLocalMessages(roomId, messages) {
 
 let syncIntervalTimer = null;
 let broadcastChannel = null;
+let typingAutoClearTimer = null;
 
 function getTopicName(roomId) {
   return `amour_couple_room_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 }
 
 /**
- * Upload image/audio file to free cloud host (tmpfiles.org) for tiny real-time message payloads
+ * Fast cloud media file uploader
  */
 async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
   try {
@@ -51,7 +52,6 @@ async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
     if (!res.ok) return null;
     const json = await res.json();
     if (json && json.data && json.data.url) {
-      // Transform view URL to direct file URL: tmpfiles.org/123/file.png -> tmpfiles.org/dl/123/file.png
       return json.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
     }
   } catch (e) {
@@ -70,7 +70,7 @@ function initSync(roomId) {
   notifyMessages();
   notifyConnection(true);
 
-  // 1. Same-device multi-tab sync via BroadcastChannel
+  // 1. Instant local tab broadcast
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
     if (broadcastChannel) broadcastChannel.close();
     broadcastChannel = new BroadcastChannel(`amour_room_${roomId}`);
@@ -80,17 +80,17 @@ function initSync(roomId) {
     };
   }
 
-  // 2. Fetch cloud history
+  // 2. Fetch cloud history (messages only, no historical typing logs)
   fetchCloudHistory(roomId);
 
-  // 3. Connect to WSS WebSockets for sub-second real-time push
+  // 3. Connect to subsecond WSS WebSockets
   initWssSocket(roomId);
 
-  // 4. REST poll fallback every 2 seconds
+  // 4. Fast polling interval (600ms) for high-speed response
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
     fetchCloudHistory(roomId);
-  }, 2000);
+  }, 600);
 }
 
 function initWssSocket(roomId) {
@@ -122,7 +122,7 @@ function initWssSocket(roomId) {
     socket.onclose = () => {
       setTimeout(() => {
         if (currentRoomId === roomId) initWssSocket(roomId);
-      }, 3000);
+      }, 1500);
     };
 
     socket.onerror = () => {};
@@ -132,7 +132,7 @@ function initWssSocket(roomId) {
 async function fetchCloudHistory(roomId) {
   const topic = getTopicName(roomId);
   try {
-    const res = await fetch(`${NTFY_SERVER_BASE}/${topic}/json?poll=1&since=all`);
+    const res = await fetch(`${NTFY_SERVER_BASE}/${topic}/json?poll=1&since=30s`);
     if (!res.ok) return;
     const textData = await res.text();
     if (!textData.trim()) return;
@@ -145,6 +145,7 @@ async function fetchCloudHistory(roomId) {
         const item = JSON.parse(line);
         if (item.event === 'message' && item.message) {
           const parsed = JSON.parse(item.message);
+          // ONLY process messages & reactions (IGNORE historical typing events)
           if (parsed.type === 'new_message' && parsed.payload) {
             const msg = parsed.payload;
             if (!messagesStore.some((m) => m.id === msg.id)) {
@@ -162,8 +163,6 @@ async function fetchCloudHistory(roomId) {
               targetMsg.reactions[userId] = emoji;
               updated = true;
             }
-          } else if (parsed.type === 'typing' && parsed.payload) {
-            notifyTyping(parsed.payload);
           }
         }
       } catch (e) {}
@@ -211,7 +210,16 @@ function notifyConnection(state) {
 }
 
 function notifyTyping(payload) {
+  // Call listener with current typing state
   typingListeners.forEach((fn) => fn(payload));
+
+  // Auto-clear typing status after 2.5s if no new typing ping arrives
+  if (typingAutoClearTimer) clearTimeout(typingAutoClearTimer);
+  if (payload && payload.isTyping) {
+    typingAutoClearTimer = setTimeout(() => {
+      typingListeners.forEach((fn) => fn({ ...payload, isTyping: false }));
+    }, 2500);
+  }
 }
 
 /**
@@ -259,7 +267,6 @@ export async function sendMessage(roomId, senderId, senderName, senderAvatar, te
 export async function sendImageMessage(roomId, senderId, senderName, imageFileOrUrl, caption = '') {
   let mediaUrl = imageFileOrUrl;
 
-  // If passed a Blob/File or base64, upload to cloud host first for tiny payload
   if (typeof imageFileOrUrl !== 'string' || imageFileOrUrl.startsWith('data:')) {
     let blobToUpload = imageFileOrUrl;
     if (typeof imageFileOrUrl === 'string' && imageFileOrUrl.startsWith('data:')) {
@@ -313,7 +320,7 @@ export async function sendAudioMessage(roomId, senderId, senderName, audioBlobOr
   return sendMsgPayloadInternal(roomId, newMsgPayload);
 }
 
-async function sendMsgPayloadInternal(roomId, payload) {
+function sendMsgPayloadInternal(roomId, payload) {
   const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
   const newMsg = {
     id: msgId,
@@ -322,28 +329,26 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Local Storage
+  // 1. Optimistic Render (<1ms)
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. BroadcastChannel
+  // 2. BroadcastChannel (0ms)
   if (broadcastChannel) {
     try {
       broadcastChannel.postMessage({ type: 'new_message', payload: newMsg });
     } catch (e) {}
   }
 
-  // 3. Post to Global Cloud Topic
+  // 3. Fast Cloud Post
   const topic = getTopicName(roomId);
-  try {
-    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-      method: 'POST',
-      body: JSON.stringify({ type: 'new_message', payload: newMsg })
-    });
-  } catch (e) {}
+  fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+    method: 'POST',
+    body: JSON.stringify({ type: 'new_message', payload: newMsg })
+  }).catch(() => {});
 
   return msgId;
 }
@@ -361,12 +366,10 @@ export async function clearRoomMessages(roomId) {
   }
 
   const topic = getTopicName(roomId);
-  try {
-    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-      method: 'POST',
-      body: JSON.stringify({ type: 'clear_chat' })
-    });
-  } catch (e) {}
+  fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+    method: 'POST',
+    body: JSON.stringify({ type: 'clear_chat' })
+  }).catch(() => {});
 }
 
 /**
@@ -381,13 +384,17 @@ export async function updateTypingState(roomId, userId, userName, isTyping) {
     } catch (e) {}
   }
 
-  const topic = getTopicName(roomId);
-  try {
-    await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+  // Fast typing broadcast over WSS / cloud
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: 'typing', payload }));
+  } else {
+    const topic = getTopicName(roomId);
+    fetch(`${NTFY_SERVER_BASE}/${topic}`, {
       method: 'POST',
-      body: JSON.stringify({ type: 'typing', payload })
-    });
-  } catch (e) {}
+      body: JSON.stringify({ type: 'typing', payload }),
+      headers: { 'Cache-Control': 'no-cache' }
+    }).catch(() => {});
+  }
 }
 
 /**
@@ -426,15 +433,13 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     }
 
     const topic = getTopicName(roomId);
-    try {
-      await fetch(`${NTFY_SERVER_BASE}/${topic}`, {
-        method: 'POST',
-        body: JSON.stringify({
-          type: 'add_reaction',
-          payload: { messageId, emoji, userId }
-        })
-      });
-    } catch (e) {}
+    fetch(`${NTFY_SERVER_BASE}/${topic}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'add_reaction',
+        payload: { messageId, emoji, userId }
+      })
+    }).catch(() => {});
   }
 }
 
