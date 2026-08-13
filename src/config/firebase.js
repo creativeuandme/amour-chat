@@ -1,11 +1,10 @@
-// WebRTC Direct P2P & High-Availability Cloud Sync Engine for AmourChat
+// Ultra-Fast Zero-Conflict WebRTC Host/Guest Engine for AmourChat
 
 import { Peer } from 'peerjs';
 
 let currentRoomId = null;
-let currentUserId = null;
 let peer = null;
-let peerConnections = new Map();
+let partnerConnection = null;
 
 let messageListeners = [];
 let connectionListeners = [];
@@ -35,17 +34,8 @@ function saveLocalMessages(roomId, messages) {
   } catch (e) {}
 }
 
-function getStoredUserId() {
-  let uid = localStorage.getItem('amour_user_id');
-  if (!uid) {
-    uid = 'usr_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
-    localStorage.setItem('amour_user_id', uid);
-  }
-  return uid;
-}
-
 /**
- * Free cloud file uploader for photos & voice notes
+ * Free media uploader for photos & voice notes
  */
 async function uploadMediaFile(fileOrBlob, filename = 'attachment') {
   try {
@@ -92,7 +82,6 @@ function mergeMessageLists(listA, listB) {
 
 function initSync(roomId) {
   currentRoomId = roomId;
-  currentUserId = getStoredUserId();
   messagesStore = getLocalMessages(roomId);
   notifyMessages();
 
@@ -106,10 +95,10 @@ function initSync(roomId) {
     };
   }
 
-  // 2. Initialize PeerJS WebRTC P2P Direct Realtime Engine
+  // 2. Initialize WebRTC Host/Guest PeerJS Engine
   initPeerJsEngine(roomId);
 
-  // 3. Fallback Cloud Poll (1000ms) for initial connection & offline sync
+  // 3. Fallback Cloud Poll (1000ms) for history persistence
   fetchCloudMessages(roomId);
   if (syncIntervalTimer) clearInterval(syncIntervalTimer);
   syncIntervalTimer = setInterval(() => {
@@ -123,18 +112,22 @@ function initPeerJsEngine(roomId) {
   }
 
   const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const peerId = `amour_${cleanRoomId}_${currentUserId.substring(4, 10)}`;
+  const hostPeerId = `amour_${cleanRoomId}_host`;
+  const guestPeerId = `amour_${cleanRoomId}_guest`;
+
+  let currentRole = localStorage.getItem(`amour_role_${cleanRoomId}`) || 'host';
+  let myPeerId = currentRole === 'host' ? hostPeerId : guestPeerId;
+  let partnerPeerId = currentRole === 'host' ? guestPeerId : hostPeerId;
 
   try {
-    peer = new Peer(peerId, {
-      debug: 0
-    });
+    peer = new Peer(myPeerId, { debug: 0 });
 
     peer.on('open', (id) => {
       isConnected = true;
       notifyConnection(true);
-      // Announce peer presence in room
-      syncPeerPresence(roomId, id);
+
+      // Continuously attempt WebRTC DataChannel connection to partner
+      connectToPartner(partnerPeerId);
     });
 
     peer.on('connection', (conn) => {
@@ -142,19 +135,37 @@ function initPeerJsEngine(roomId) {
     });
 
     peer.on('error', (err) => {
-      // Re-initialize peer on disconnect
-      setTimeout(() => {
-        if (currentRoomId === roomId) initPeerJsEngine(roomId);
-      }, 3000);
+      if (err.type === 'unavailable-id') {
+        // Host ID is taken by partner -> switch role to guest!
+        localStorage.setItem(`amour_role_${cleanRoomId}`, 'guest');
+        setTimeout(() => {
+          if (currentRoomId === roomId) initPeerJsEngine(roomId);
+        }, 300);
+      } else {
+        setTimeout(() => {
+          if (currentRoomId === roomId) initPeerJsEngine(roomId);
+        }, 3000);
+      }
     });
   } catch (e) {}
 }
 
+function connectToPartner(partnerPeerId) {
+  if (!peer || peer.destroyed) return;
+  try {
+    const conn = peer.connect(partnerPeerId, { reliable: true });
+    setupDataConnection(conn);
+  } catch (e) {}
+}
+
 function setupDataConnection(conn) {
-  peerConnections.set(conn.peer, conn);
+  partnerConnection = conn;
 
   conn.on('open', () => {
-    // Send local message history to newly connected peer
+    isConnected = true;
+    notifyConnection(true);
+
+    // Sync message history with partner over WebRTC DataChannel
     if (messagesStore.length > 0) {
       conn.send({
         type: 'sync_history',
@@ -179,48 +190,8 @@ function setupDataConnection(conn) {
   });
 
   conn.on('close', () => {
-    peerConnections.delete(conn.peer);
+    partnerConnection = null;
   });
-}
-
-async function syncPeerPresence(roomId, myPeerId) {
-  try {
-    // Announce peer ID to room cloud registry
-    const registryKey = `amour_reg_${roomId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-    const res = await fetch(`${CLOUD_API_BASE}`);
-    if (!res.ok) return;
-    const all = await res.json();
-    const found = all.find((o) => o.name === registryKey);
-
-    let activePeers = [];
-    if (found && found.data && Array.isArray(found.data.peers)) {
-      activePeers = found.data.peers.filter((p) => p.id !== myPeerId && Date.now() - p.ts < 15000);
-    }
-
-    // Connect to active peers in the same room
-    activePeers.forEach((p) => {
-      if (!peerConnections.has(p.id)) {
-        const conn = peer.connect(p.id);
-        setupDataConnection(conn);
-      }
-    });
-
-    // Update presence in registry
-    activePeers.push({ id: myPeerId, ts: Date.now() });
-    if (found) {
-      await fetch(`${CLOUD_API_BASE}/${found.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: registryKey, data: { peers: activePeers } })
-      });
-    } else {
-      await fetch(CLOUD_API_BASE, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: registryKey, data: { peers: activePeers } })
-      });
-    }
-  } catch (e) {}
 }
 
 async function fetchCloudMessages(roomId) {
@@ -243,7 +214,8 @@ async function fetchCloudMessages(roomId) {
 
       if (found.data.typing) {
         const { userId, userName, isTyping, timestamp } = found.data.typing;
-        if (userId !== currentUserId) {
+        const myUserId = localStorage.getItem('amour_user_id');
+        if (userId !== myUserId) {
           if (isTyping && Date.now() - (timestamp || 0) < 4000) {
             notifyTyping({ userId, userName, isTyping: true });
           } else {
@@ -312,17 +284,15 @@ function handleIncomingPayload(type, payload) {
   }
 }
 
-function broadcastToPeers(type, payload) {
-  // Broadcast over WebRTC P2P DataChannels (<1ms)
-  peerConnections.forEach((conn) => {
-    if (conn && conn.open) {
-      try {
-        conn.send({ type, payload });
-      } catch (e) {}
-    }
-  });
+function broadcastToPartner(type, payload) {
+  // 1. Direct WebRTC DataChannel (<1ms)
+  if (partnerConnection && partnerConnection.open) {
+    try {
+      partnerConnection.send({ type, payload });
+    } catch (e) {}
+  }
 
-  // Broadcast over local tab BroadcastChannel
+  // 2. Multi-tab BroadcastChannel
   if (broadcastChannel) {
     try {
       broadcastChannel.postMessage({ type, payload });
@@ -440,17 +410,17 @@ async function sendMsgPayloadInternal(roomId, payload) {
     reactions: {}
   };
 
-  // 1. Optimistic Render (<1ms)
+  // 1. Optimistic Local Render (<1ms)
   if (!messagesStore.some((m) => m.id === newMsg.id)) {
     messagesStore.push(newMsg);
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
   }
 
-  // 2. Direct P2P Broadcast over WebRTC DataChannel (<1ms)
-  broadcastToPeers('new_message', newMsg);
+  // 2. Direct WebRTC DataChannel (<1ms)
+  broadcastToPartner('new_message', newMsg);
 
-  // 3. Cloud Storage Sync
+  // 3. Cloud Storage Backup
   syncCloudStorage(roomId);
 
   return msgId;
@@ -461,14 +431,14 @@ export async function clearRoomMessages(roomId) {
   saveLocalMessages(roomId, []);
   notifyMessages();
 
-  broadcastToPeers('clear_chat', null);
+  broadcastToPartner('clear_chat', null);
   syncCloudStorage(roomId);
 }
 
 export async function updateTypingState(roomId, userId, userName, isTyping) {
   const payload = { userId, userName, isTyping, timestamp: Date.now() };
 
-  broadcastToPeers('typing', payload);
+  broadcastToPartner('typing', payload);
   syncCloudStorage(roomId, payload);
 }
 
@@ -492,13 +462,13 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
     saveLocalMessages(roomId, messagesStore);
     notifyMessages();
 
-    broadcastToPeers('add_reaction', { messageId, emoji, userId });
+    broadcastToPartner('add_reaction', { messageId, emoji, userId });
     syncCloudStorage(roomId);
   }
 }
 
 export function getFirebaseConfig() {
-  return { apiKey: "WebRTC-P2P-Engine-Active", databaseURL: CLOUD_API_BASE };
+  return { apiKey: "WebRTC-HostGuest-Engine-Active", databaseURL: CLOUD_API_BASE };
 }
 export function saveCustomFirebaseConfig() {}
 export function resetFirebaseConfig() {}
