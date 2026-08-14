@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { formatTimestamp } from '../utils/helpers';
-import { Heart, Smile, Share2 } from 'lucide-react';
+import { Heart, Smile, Share2, ArrowDown } from 'lucide-react';
 
 const REACTION_EMOJIS = ['❤️', '💖', '😘', '🔥', '👍', '🌹'];
 
@@ -11,19 +11,54 @@ export default function MessageList({
   onCopyLink
 }) {
   const scrollRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const isScrolledUpRef = useRef(false);
+
   const [activeReactionMsgId, setActiveReactionMsgId] = useState(null);
+  const [showNewMsgBadge, setShowNewMsgBadge] = useState(false);
 
-  console.log("[RENDER MESSAGE COUNT]", messages.length);
+  // Monitor user scrolling to detect if user has intentionally scrolled up
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 120;
 
-  // Auto scroll to bottom
+    isScrolledUpRef.current = !isNearBottom;
+    if (isNearBottom) {
+      setShowNewMsgBadge(false);
+    }
+  };
+
+  // Chronological Auto-scroll handler
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (messages.length === 0) return;
+
+    if (!isScrolledUpRef.current) {
+      // User is at bottom or initial load -> scroll to newest message at bottom
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      setShowNewMsgBadge(false);
+    } else {
+      // User has intentionally scrolled up -> show "New message" pill instead of forcing scroll
+      setShowNewMsgBadge(true);
     }
   }, [messages]);
 
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setShowNewMsgBadge(false);
+    isScrolledUpRef.current = false;
+  };
+
   return (
-    <div className="message-list-container" ref={scrollRef}>
+    <div className="message-list-container" ref={scrollRef} onScroll={handleScroll}>
+      {/* Floating New Message Badge when scrolled up */}
+      {showNewMsgBadge && (
+        <button className="new-message-badge" onClick={scrollToBottom}>
+          <ArrowDown size={14} />
+          <span>New message</span>
+        </button>
+      )}
+
       {messages.length === 0 ? (
         <div className="empty-chat-state">
           <div className="heart-icon-wrapper">
@@ -102,6 +137,8 @@ export default function MessageList({
               </div>
             );
           })}
+          {/* Scroll Target Element for Newest Message */}
+          <div ref={messagesEndRef} style={{ float: 'left', clear: 'both' }} />
         </div>
       )}
 
@@ -113,6 +150,32 @@ export default function MessageList({
           display: flex;
           flex-direction: column;
           position: relative;
+        }
+
+        .new-message-badge {
+          position: sticky;
+          top: 10px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: var(--primary-rose);
+          color: white;
+          padding: 6px 14px;
+          border-radius: var(--radius-full);
+          font-size: 0.8rem;
+          font-weight: 600;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          box-shadow: 0 4px 12px rgba(230, 57, 70, 0.4);
+          z-index: 30;
+          cursor: pointer;
+          width: fit-content;
+          margin: 0 auto 10px auto;
+          animation: popIn 0.2s ease;
+        }
+
+        .new-message-badge:hover {
+          transform: translateX(-50%) scale(1.05);
         }
 
         .empty-chat-state {
