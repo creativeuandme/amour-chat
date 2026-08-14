@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   Heart, 
   Copy, 
@@ -11,7 +11,8 @@ import {
   Wifi, 
   WifiOff, 
   Settings, 
-  User 
+  User,
+  ArrowRight
 } from 'lucide-react';
 
 export default function Header({
@@ -26,29 +27,71 @@ export default function Header({
   onOpenSettings,
   theme,
   onToggleTheme,
-  onChangeNickname
+  onChangeNickname,
+  onJoinRoom
 }) {
+  const [isEditingRoom, setIsEditingRoom] = useState(false);
+  const [roomInput, setRoomInput] = useState('');
+
+  const handleJoinSubmit = (e) => {
+    e.preventDefault();
+    if (roomInput.trim()) {
+      onJoinRoom(roomInput.trim());
+      setIsEditingRoom(false);
+      setRoomInput('');
+    }
+  };
+
   return (
     <header className="chat-header">
-      {/* Left: App Logo & Room Info */}
+      {/* Left: App Logo & Interactive Room Switcher */}
       <div className="header-left">
         <div className="brand-badge">
           <Heart className="brand-icon" size={22} fill="#E63946" />
           <span className="brand-name">AmourChat</span>
         </div>
 
-        <div className="room-pill">
-          <span className="room-label">Room:</span>
-          <span className="room-code">{roomId}</span>
-          <button 
-            className={`copy-link-btn ${isCopied ? 'copied' : ''}`}
-            onClick={onCopyLink}
-            title="Copy Private Room URL"
-          >
-            {isCopied ? <Check size={14} /> : <Copy size={14} />}
-            <span>{isCopied ? 'Copied!' : 'Share Link'}</span>
-          </button>
-        </div>
+        {isEditingRoom ? (
+          <form className="room-edit-form" onSubmit={handleJoinSubmit}>
+            <input
+              type="text"
+              className="room-input-field"
+              placeholder="Enter Room Code..."
+              value={roomInput}
+              onChange={(e) => setRoomInput(e.target.value)}
+              autoFocus
+            />
+            <button type="submit" className="room-join-btn" title="Join Room">
+              <ArrowRight size={14} />
+              <span>Join</span>
+            </button>
+            <button type="button" className="room-cancel-btn" onClick={() => setIsEditingRoom(false)}>
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <div className="room-pill">
+            <span className="room-label">Room:</span>
+            <span
+              className="room-code clickable"
+              onClick={() => {
+                setRoomInput(roomId);
+                setIsEditingRoom(true);
+              }}
+              title="Click to Change / Join Room"
+            >
+              {roomId} ✏️
+            </span>
+            <button 
+              className={`copy-link-btn ${isCopied ? 'copied' : ''}`}
+              onClick={onCopyLink}
+              title="Copy Private Room URL"
+            >
+              {isCopied ? <Check size={14} /> : <Copy size={14} />}
+              <span>{isCopied ? 'Copied!' : 'Share Link'}</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Right: Actions & Status */}
@@ -79,7 +122,7 @@ export default function Header({
           <Download size={18} />
         </button>
 
-        <button className="icon-btn danger" onClick={onOpenClear} title="Clear Entire Conversation">
+        <button className="icon-btn danger" onClick={onOpenClear} title="Clear Conversation">
           <Trash2 size={18} />
         </button>
 
@@ -87,7 +130,7 @@ export default function Header({
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
         </button>
 
-        <button className="icon-btn" onClick={onOpenSettings} title="Database & Audio Settings">
+        <button className="icon-btn" onClick={onOpenSettings} title="Settings">
           <Settings size={18} />
         </button>
 
@@ -159,6 +202,46 @@ export default function Header({
         .room-code {
           font-weight: 600;
           color: var(--primary-rose);
+        }
+
+        .room-code.clickable {
+          cursor: pointer;
+          text-decoration: underline;
+          text-underline-offset: 3px;
+        }
+
+        .room-edit-form {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .room-input-field {
+          padding: 4px 10px;
+          border-radius: var(--radius-full);
+          border: 1px solid var(--primary-rose);
+          font-size: 0.82rem;
+          background: var(--glass-bg);
+          color: var(--text-main);
+          width: 150px;
+        }
+
+        .room-join-btn {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          background: var(--primary-rose);
+          color: white;
+          padding: 4px 10px;
+          border-radius: var(--radius-full);
+          font-size: 0.78rem;
+          font-weight: 600;
+        }
+
+        .room-cancel-btn {
+          font-size: 0.76rem;
+          color: var(--text-muted);
+          background: transparent;
         }
 
         .copy-link-btn {

@@ -128,6 +128,16 @@ export default function App() {
     showToast(`Welcome, ${newNick}!`);
   };
 
+  const handleJoinRoom = (newRoomCode) => {
+    const clean = newRoomCode.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+    if (clean) {
+      setRoomId(clean);
+      updateRoomUrl(clean);
+      setMessages([]);
+      showToast(`Joined room: ${clean}`);
+    }
+  };
+
   const handleSendMessage = async (text) => {
     const currentNick = nickname || localStorage.getItem(`amour_nickname_${roomId}`) || 'Anonymous';
     await sendMessage(roomId, userId, currentNick, 'rose', text);
@@ -216,13 +226,13 @@ export default function App() {
         theme={theme}
         onToggleTheme={handleToggleTheme}
         onChangeNickname={() => setShowNicknameModal(true)}
+        onJoinRoom={handleJoinRoom}
       />
 
       {/* Main Chat Feed */}
       <MessageList
         messages={messages}
         currentUserId={userId}
-        partnerTyping={null}
         onAddReaction={handleAddReaction}
         onCopyLink={handleCopyLink}
       />
