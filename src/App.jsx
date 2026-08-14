@@ -20,12 +20,8 @@ import {
 
 import {
   sendMessage,
-  sendImageMessage,
-  sendAudioMessage,
   listenToMessages,
   clearRoomMessages,
-  updateTypingState,
-  listenToTyping,
   addReactionToMessage,
   listenToConnectionState
 } from './config/firebase';
@@ -59,8 +55,7 @@ export default function App() {
 
   // 3. Application Data States
   const [messages, setMessages] = useState([]);
-  const [partnerTyping, setPartnerTyping] = useState(null);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(true);
   const [isCopied, setIsCopied] = useState(false);
   const [toastMessage, setToastMessage] = useState(null);
 
@@ -113,20 +108,15 @@ export default function App() {
       ) {
         const lastMsg = msgList[msgList.length - 1];
         if (lastMsg && lastMsg.senderId !== userId && soundEnabled) {
-          playNotificationSound();
+          try { playNotificationSound(); } catch (e) {}
         }
       }
       prevMsgCountRef.current = msgList.length;
     });
 
-    const unsubTyping = listenToTyping(roomId, userId, (typingUser) => {
-      setPartnerTyping(typingUser);
-    });
-
     return () => {
       if (typeof unsubConn === 'function') unsubConn();
       if (typeof unsubMsgs === 'function') unsubMsgs();
-      if (typeof unsubTyping === 'function') unsubTyping();
     };
   }, [roomId, userId, soundEnabled]);
 
@@ -139,34 +129,8 @@ export default function App() {
   };
 
   const handleSendMessage = async (text) => {
-    if (!nickname) {
-      setShowNicknameModal(true);
-      return;
-    }
-    await sendMessage(roomId, userId, nickname, 'rose', text);
-  };
-
-  const handleSendImage = async (imageDataUrl, caption) => {
-    if (!nickname) {
-      setShowNicknameModal(true);
-      return;
-    }
-    await sendImageMessage(roomId, userId, nickname, imageDataUrl, caption);
-    showToast('Photo memory sent!');
-  };
-
-  const handleSendAudio = async (audioDataUrl, durationSec) => {
-    if (!nickname) {
-      setShowNicknameModal(true);
-      return;
-    }
-    await sendAudioMessage(roomId, userId, nickname, audioDataUrl, durationSec);
-    showToast('Voice note sent!');
-  };
-
-  const handleTyping = (isTyping) => {
-    if (!nickname) return;
-    updateTypingState(roomId, userId, nickname, isTyping);
+    const currentNick = nickname || localStorage.getItem(`amour_nickname_${roomId}`) || 'Anonymous';
+    await sendMessage(roomId, userId, currentNick, 'rose', text);
   };
 
   const handleAddReaction = (messageId, emoji) => {
@@ -258,7 +222,7 @@ export default function App() {
       <MessageList
         messages={messages}
         currentUserId={userId}
-        partnerTyping={partnerTyping}
+        partnerTyping={null}
         onAddReaction={handleAddReaction}
         onCopyLink={handleCopyLink}
       />
@@ -266,9 +230,6 @@ export default function App() {
       {/* Bottom Message Input Bar */}
       <MessageInput
         onSendMessage={handleSendMessage}
-        onSendImage={handleSendImage}
-        onSendAudio={handleSendAudio}
-        onTyping={handleTyping}
       />
 
       {/* Modals */}
