@@ -23,7 +23,8 @@ import {
   listenToMessages,
   clearRoomMessages,
   addReactionToMessage,
-  listenToConnectionState
+  listenToConnectionState,
+  runFirebaseDiagnosticTest
 } from './config/firebase';
 
 export default function App() {
@@ -73,6 +74,11 @@ export default function App() {
 
   const prevMsgCountRef = useRef(0);
 
+  // Diagnostic Test Mount
+  useEffect(() => {
+    runFirebaseDiagnosticTest();
+  }, []);
+
   // Sync theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -91,18 +97,21 @@ export default function App() {
     }
   }, [roomId]);
 
-  // Real-Time Subscriptions
+  // Real-Time Subscriptions & Logging
   useEffect(() => {
     if (!roomId) return;
 
-    console.log("ROOM ID:", roomId);
-    console.log("FIREBASE PATH:", `rooms/${roomId}/messages`);
+    console.log("[ROOM DEBUG]", {
+      roomId,
+      path: `rooms/${roomId}/messages`
+    });
 
     const unsubConn = listenToConnectionState((connected) => {
       setIsConnected(connected);
     });
 
     const unsubMsgs = listenToMessages(roomId, (msgList) => {
+      console.log("[STATE] Updating messages:", msgList);
       setMessages(msgList);
 
       if (

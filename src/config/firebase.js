@@ -1,4 +1,4 @@
-// Clean, Single Source of Truth Firebase Realtime Database Client
+// Instrumented Single Source of Truth Firebase Realtime Database Client
 
 import { initializeApp } from 'firebase/app';
 import {
@@ -8,8 +8,7 @@ import {
   onValue,
   off,
   set,
-  remove,
-  serverTimestamp
+  remove
 } from 'firebase/database';
 
 export const firebaseConfig = {
@@ -25,12 +24,35 @@ export const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 export const db = getDatabase(app);
 
+console.log("[FIREBASE] initialized");
+console.log("[FIREBASE] databaseURL:", firebaseConfig.databaseURL);
+
+/**
+ * 12. Minimal Temporary Firebase Test
+ */
+export async function runFirebaseDiagnosticTest() {
+  const testRef = ref(db, "debug/test");
+  try {
+    await set(testRef, {
+      message: "Firebase test",
+      timestamp: Date.now()
+    });
+    console.log("[TEST] Firebase write completed");
+    onValue(testRef, (snapshot) => {
+      console.log("[TEST] Firebase read:", snapshot.val());
+    }, { onlyOnce: true });
+  } catch (error) {
+    console.error("[TEST] Firebase test write failed:", error);
+  }
+}
+
 /**
  * Listen to Connection State
  */
 export function listenToConnectionState(onStateChange) {
   const connectedRef = ref(db, '.info/connected');
   const unsubscribe = onValue(connectedRef, (snap) => {
+    console.log("[FIREBASE CONNECTION] connected:", snap.val());
     onStateChange(snap.val() === true);
   });
   return () => unsubscribe();
@@ -44,14 +66,19 @@ export function listenToMessages(roomId, onMessagesUpdate) {
   if (!roomId) return () => {};
 
   const messagesPath = `rooms/${roomId}/messages`;
-  console.log("ROOM ID:", roomId);
-  console.log("FIREBASE PATH:", messagesPath);
+  console.log("[LISTENER] subscribing");
+  console.log("[LISTENER] roomId:", roomId);
+  console.log("[LISTENER] path:", messagesPath);
 
   const messagesRef = ref(db, messagesPath);
 
   const unsubscribe = onValue(
     messagesRef,
     (snapshot) => {
+      console.log("[LISTENER] Firebase update received");
+      console.log("[LISTENER] snapshot exists:", snapshot.exists());
+      console.log("[LISTENER] raw data:", snapshot.val());
+
       const data = snapshot.val();
       if (!data) {
         onMessagesUpdate([]);
@@ -63,17 +90,19 @@ export function listenToMessages(roomId, onMessagesUpdate) {
         ...message
       }));
 
-      // Sort chronologically by timestamp
       messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
       onMessagesUpdate(messages);
     },
     (error) => {
-      console.error("Firebase Realtime Database Listener Error:", error);
+      console.error("[LISTENER] FIREBASE LISTENER ERROR:", error);
     }
   );
 
   return () => {
+    console.log("[LISTENER] unsubscribing");
+    console.log("[LISTENER] roomId:", roomId);
+    console.log("[LISTENER] path:", messagesPath);
     off(messagesRef);
     unsubscribe();
   };
@@ -87,11 +116,14 @@ export async function sendMessage(roomId, senderId, nickname, text) {
   if (!roomId || !text.trim()) return;
 
   const messagesPath = `rooms/${roomId}/messages`;
-  console.log("SENDING TO FIREBASE PATH:", messagesPath);
+  console.log("[SEND] Starting send");
+  console.log("[SEND] roomId:", roomId);
+  console.log("[SEND] message:", text);
+  console.log("[SEND] path:", messagesPath);
 
   const messagesRef = ref(db, messagesPath);
 
-  const newMsg = {
+  const messageData = {
     senderId,
     nickname,
     text: text.trim(),
@@ -100,10 +132,13 @@ export async function sendMessage(roomId, senderId, nickname, text) {
   };
 
   try {
-    const newRef = await push(messagesRef, newMsg);
-    return newRef.key;
+    const newMessageRef = push(messagesRef);
+    console.log("[SEND] generated key:", newMessageRef.key);
+    await set(newMessageRef, messageData);
+    console.log("[SEND] Firebase write SUCCESS");
+    return newMessageRef.key;
   } catch (error) {
-    console.error("Firebase Push Error:", error);
+    console.error("[SEND] FIREBASE WRITE FAILED:", error);
     throw error;
   }
 }
@@ -118,7 +153,7 @@ export async function addReactionToMessage(roomId, messageId, emoji, userId) {
   try {
     await set(ref(db, reactionPath), emoji);
   } catch (error) {
-    console.error("Firebase Add Reaction Error:", error);
+    console.error("[REACTION] FIREBASE WRITE FAILED:", error);
   }
 }
 
@@ -132,7 +167,7 @@ export async function clearRoomMessages(roomId) {
   try {
     await remove(ref(db, messagesPath));
   } catch (error) {
-    console.error("Firebase Clear Room Error:", error);
+    console.error("[CLEAR] FIREBASE WRITE FAILED:", error);
   }
 }
 
