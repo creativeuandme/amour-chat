@@ -95,6 +95,9 @@ export default function App() {
   useEffect(() => {
     if (!roomId) return;
 
+    console.log("ROOM ID:", roomId);
+    console.log("FIREBASE PATH:", `rooms/${roomId}/messages`);
+
     const unsubConn = listenToConnectionState((connected) => {
       setIsConnected(connected);
     });
@@ -129,7 +132,7 @@ export default function App() {
   };
 
   const handleJoinRoom = (newRoomCode) => {
-    const clean = newRoomCode.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
+    const clean = newRoomCode.trim();
     if (clean) {
       setRoomId(clean);
       updateRoomUrl(clean);
@@ -140,7 +143,7 @@ export default function App() {
 
   const handleSendMessage = async (text) => {
     const currentNick = nickname || localStorage.getItem(`amour_nickname_${roomId}`) || 'Anonymous';
-    await sendMessage(roomId, userId, currentNick, 'rose', text);
+    await sendMessage(roomId, userId, currentNick, text);
   };
 
   const handleAddReaction = (messageId, emoji) => {
