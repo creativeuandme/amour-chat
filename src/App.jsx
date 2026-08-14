@@ -304,6 +304,8 @@ export default function App() {
           soundEnabled={soundEnabled}
           onToggleSound={handleToggleSound}
           onClose={() => setActiveModal(null)}
+          userId={userId}
+          deviceId={deviceId}
         />
       )}
     </div>

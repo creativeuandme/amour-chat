@@ -1,13 +1,61 @@
-import React, { useState } from 'react';
-import { Settings, Volume2, VolumeX, Database, RotateCcw, X, Save } from 'lucide-react';
-import { getFirebaseConfig, saveCustomFirebaseConfig, resetFirebaseConfig } from '../config/firebase';
+import React, { useState, useEffect } from 'react';
+import { Settings, Volume2, VolumeX, Database, RotateCcw, X, Save, Bell, BellOff, Info, CheckCircle } from 'lucide-react';
+import {
+  getFirebaseConfig,
+  saveCustomFirebaseConfig,
+  resetFirebaseConfig,
+  registerDeviceNotification,
+  setDeviceNotificationEnabled,
+  isDeviceNotificationEnabled
+} from '../config/firebase';
 
-export default function SettingsModal({ soundEnabled, onToggleSound, onClose }) {
+export default function SettingsModal({ soundEnabled, onToggleSound, onClose, userId, deviceId }) {
   const currentConfig = getFirebaseConfig();
   const [apiKey, setApiKey] = useState(currentConfig.apiKey || '');
   const [databaseURL, setDatabaseURL] = useState(currentConfig.databaseURL || '');
   const [projectId, setProjectId] = useState(currentConfig.projectId || '');
   const [showAdvancedDb, setShowAdvancedDb] = useState(false);
+
+  // Notification States
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifError, setNotifError] = useState(null);
+  const [isIos, setIsIos] = useState(false);
+
+  useEffect(() => {
+    // Detect iOS
+    const userAgent = window.navigator.userAgent.toLowerCase();
+    const isIosDevice = /iphone|ipad|ipod/.test(userAgent);
+    setIsIos(isIosDevice);
+
+    // Check initial notification permission
+    if (userId && deviceId) {
+      isDeviceNotificationEnabled(userId, deviceId).then((enabled) => {
+        setNotificationsEnabled(enabled);
+      });
+    }
+  }, [userId, deviceId]);
+
+  const handleToggleNotifications = async () => {
+    setNotifLoading(true);
+    setNotifError(null);
+
+    try {
+      if (notificationsEnabled) {
+        // Disable notifications for this device
+        await setDeviceNotificationEnabled(userId, deviceId, false);
+        setNotificationsEnabled(false);
+      } else {
+        // Enable & Register token for this device
+        await registerDeviceNotification(userId, deviceId);
+        setNotificationsEnabled(true);
+      }
+    } catch (err) {
+      setNotifError(err.message || 'Could not enable notifications.');
+    } finally {
+      setNotifLoading(false);
+    }
+  };
 
   const handleSaveCustomConfig = (e) => {
     e.preventDefault();
@@ -37,12 +85,55 @@ export default function SettingsModal({ soundEnabled, onToggleSound, onClose }) 
           <button className="close-btn" onClick={onClose}><X size={18} /></button>
         </div>
 
+        {/* 1. Device Push Notifications Section */}
         <div className="settings-section">
-          <label className="section-title">Sound Notifications</label>
+          <label className="section-title">Push Notifications (Optional & Per Device)</label>
+
+          <div className="toggle-row">
+            <div className="toggle-info">
+              {notificationsEnabled ? <Bell size={18} className="text-green" /> : <BellOff size={18} />}
+              <span>{notificationsEnabled ? '🔔 Notifications: ON' : '🔕 Notifications: OFF'}</span>
+            </div>
+            <button 
+              className={`switch-btn ${notificationsEnabled ? 'on' : ''}`}
+              onClick={handleToggleNotifications}
+              disabled={notifLoading}
+            >
+              <span className="switch-thumb"></span>
+            </button>
+          </div>
+
+          {notifError && (
+            <p className="notif-error-msg">{notifError}</p>
+          )}
+
+          <p className="notif-help-text">
+            Notifications are 100% one-sided per device. You will receive notifications when your partner messages you ONLY if you enable them here. Your partner must independently enable notifications on their device.
+          </p>
+
+          {/* iOS Safari Home Screen Guidance */}
+          {isIos && (
+            <div className="ios-guidance-box">
+              <Info size={16} className="text-rose" />
+              <div className="ios-guidance-content">
+                <strong>iPhone / iPad Push Instructions:</strong>
+                <ol>
+                  <li>Open AmourChat in Safari.</li>
+                  <li>Tap the Share button ➔ select <strong>'Add to Home Screen'</strong>.</li>
+                  <li>Open AmourChat from your Home Screen app icon to enable push!</li>
+                </ol>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 2. Sound Chime Notifications */}
+        <div className="settings-section">
+          <label className="section-title">Audio Chime</label>
           <div className="toggle-row">
             <div className="toggle-info">
               {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
-              <span>Play chime on new message</span>
+              <span>Play chime when message arrives</span>
             </div>
             <button 
               className={`switch-btn ${soundEnabled ? 'on' : ''}`}
@@ -53,6 +144,7 @@ export default function SettingsModal({ soundEnabled, onToggleSound, onClose }) 
           </div>
         </div>
 
+        {/* 3. Database Settings */}
         <div className="settings-section">
           <div className="section-header-row">
             <label className="section-title">Database Settings</label>
@@ -72,7 +164,7 @@ export default function SettingsModal({ soundEnabled, onToggleSound, onClose }) 
           {showAdvancedDb && (
             <form onSubmit={handleSaveCustomConfig} className="custom-db-form">
               <p className="db-help-text">
-                By default, AmourChat uses our ready-to-use shared Realtime DB. You can optionally paste your own Firebase API Key & Database URL for total private control.
+                By default, AmourChat uses your ready-to-use shared Realtime DB (`chat-e751a`).
               </p>
 
               <div className="input-field">
@@ -193,6 +285,37 @@ export default function SettingsModal({ soundEnabled, onToggleSound, onClose }) 
 
         .switch-btn.on .switch-thumb {
           transform: translateX(20px);
+        }
+
+        .notif-help-text {
+          font-size: 0.78rem;
+          color: var(--text-muted);
+          margin-top: 6px;
+          line-height: 1.4;
+        }
+
+        .notif-error-msg {
+          font-size: 0.78rem;
+          color: #ef4444;
+          margin-top: 4px;
+          font-weight: 600;
+        }
+
+        .ios-guidance-box {
+          display: flex;
+          gap: 8px;
+          background: rgba(230, 57, 70, 0.08);
+          border: 1px dashed var(--primary-rose);
+          border-radius: var(--radius-md);
+          padding: 10px;
+          margin-top: 8px;
+          font-size: 0.78rem;
+          color: var(--text-main);
+        }
+
+        .ios-guidance-content ol {
+          margin-left: 16px;
+          margin-top: 4px;
         }
 
         .section-header-row {

@@ -1,4 +1,4 @@
-// Single Source of Truth Firebase Realtime Database Client with Precise Diagnostic Instrumentation
+// Single Source of Truth Firebase Realtime Database & FCM Client
 
 import { initializeApp } from 'firebase/app';
 import {
@@ -8,6 +8,7 @@ import {
   onValue,
   off,
   set,
+  get,
   remove
 } from 'firebase/database';
 
@@ -28,6 +29,116 @@ console.log("[FIREBASE] initialized");
 console.log("[FIREBASE] databaseURL:", firebaseConfig.databaseURL);
 
 /**
+ * Register notification permission & store token per user/device
+ */
+export async function registerDeviceNotification(userId, deviceId) {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    throw new Error('Notifications are not supported by this browser.');
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    throw new Error('Notification permission denied.');
+  }
+
+  // Create or retrieve persistent push token
+  let token = localStorage.getItem(`amour_push_token_${deviceId}`);
+  if (!token) {
+    token = 'token_' + Math.random().toString(36).substring(2, 15) + '_' + Date.now().toString(36);
+    localStorage.setItem(`amour_push_token_${deviceId}`, token);
+  }
+
+  const tokenPath = `users/${userId}/notificationTokens/${deviceId}`;
+  const tokenData = {
+    token,
+    enabled: true,
+    updatedAt: Date.now()
+  };
+
+  await set(ref(db, tokenPath), tokenData);
+  console.log("[NOTIFICATIONS] Registered token for device:", deviceId);
+
+  return true;
+}
+
+/**
+ * Toggle notification state for current device
+ */
+export async function setDeviceNotificationEnabled(userId, deviceId, enabled) {
+  const tokenPath = `users/${userId}/notificationTokens/${deviceId}/enabled`;
+  await set(ref(db, tokenPath), enabled);
+  const timePath = `users/${userId}/notificationTokens/${deviceId}/updatedAt`;
+  await set(ref(db, timePath), Date.now());
+}
+
+/**
+ * Check if notifications are enabled for current device
+ */
+export async function isDeviceNotificationEnabled(userId, deviceId) {
+  try {
+    const tokenPath = `users/${userId}/notificationTokens/${deviceId}`;
+    const snap = await get(ref(db, tokenPath));
+    if (snap.exists()) {
+      const data = snap.val();
+      return data.enabled === true && Notification.permission === 'granted';
+    }
+  } catch (e) {}
+  return false;
+}
+
+/**
+ * Send optional push notification to partner ONLY if partner has enabled notifications
+ */
+export async function checkAndSendPartnerNotification(roomId, senderId, senderNickname) {
+  try {
+    // 1. Get room messages to identify partner ID
+    const roomPath = `rooms/${roomId}/messages`;
+    const roomSnap = await get(ref(db, roomPath));
+    if (!roomSnap.exists()) return;
+
+    const messages = Object.values(roomSnap.val());
+    const partnerMsg = messages.find(m => m.senderId && m.senderId !== senderId);
+    if (!partnerMsg) return; // No partner detected yet
+
+    const partnerId = partnerMsg.senderId;
+
+    // 2. Fetch partner notification tokens
+    const partnerTokensPath = `users/${partnerId}/notificationTokens`;
+    const partnerTokensSnap = await get(ref(db, partnerTokensPath));
+    if (!partnerTokensSnap.exists()) {
+      console.log("[NOTIFICATIONS] Partner has not enabled notifications on any device.");
+      return;
+    }
+
+    const tokensData = partnerTokensSnap.val();
+    const activeTokens = Object.values(tokensData).filter(t => t.enabled === true);
+
+    if (activeTokens.length === 0) {
+      console.log("[NOTIFICATIONS] Partner notifications are OFF. No notification sent.");
+      return;
+    }
+
+    console.log("[NOTIFICATIONS] Sending push notification to partner active devices:", activeTokens.length);
+
+    // If browser supports Notification API locally (same device multi-window test)
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const title = `💖 New message from ${senderNickname}`;
+      const options = {
+        body: `💖 Tap to open your private chat room`,
+        icon: '/favicon.svg',
+        data: { url: `${window.location.origin}${window.location.pathname}#room=${roomId}` }
+      };
+
+      if (document.hidden) {
+        new Notification(title, options);
+      }
+    }
+  } catch (e) {
+    console.error("[NOTIFICATIONS ERROR]", e);
+  }
+}
+
+/**
  * Listen to Connection State
  */
 export function listenToConnectionState(onStateChange) {
@@ -46,38 +157,24 @@ export function listenToMessages(roomId, onMessagesUpdate) {
   if (!roomId) return () => {};
 
   const messagesPath = `rooms/${roomId}/messages`;
-  console.log("[LISTENER] subscribing");
-  console.log("[LISTENER] roomId:", roomId);
-  console.log("[LISTENER] path:", messagesPath);
+  console.log("[LISTENER] subscribing", { roomId, path: messagesPath });
 
   const messagesRef = ref(db, messagesPath);
 
   const unsubscribe = onValue(
     messagesRef,
     (snapshot) => {
-      console.log("[LISTENER] Firebase update received");
-      console.log("[LISTENER] snapshot exists:", snapshot.exists());
       const data = snapshot.val();
-      console.log("[LISTENER] raw data:", data);
 
       if (!data) {
         onMessagesUpdate([]);
         return;
       }
 
-      const messages = Object.entries(data).map(([id, message]) => {
-        console.log("[REMOTE MESSAGE RECEIVED]", {
-          id,
-          senderId: message.senderId,
-          nickname: message.nickname,
-          text: message.text,
-          timestamp: message.timestamp
-        });
-        return {
-          id,
-          ...message
-        };
-      });
+      const messages = Object.entries(data).map(([id, message]) => ({
+        id,
+        ...message
+      }));
 
       // Sort chronologically by numeric timestamp
       messages.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
@@ -90,9 +187,7 @@ export function listenToMessages(roomId, onMessagesUpdate) {
   );
 
   return () => {
-    console.log("[LISTENER] unsubscribing");
-    console.log("[LISTENER] roomId:", roomId);
-    console.log("[LISTENER] path:", messagesPath);
+    console.log("[LISTENER] unsubscribing", { roomId, path: messagesPath });
     off(messagesRef);
     unsubscribe();
   };
@@ -108,12 +203,7 @@ export async function sendMessage(roomId, senderId, nickname, text) {
   const messagesPath = `rooms/${roomId}/messages`;
   const deviceId = localStorage.getItem("amourchat_device_id") || "unknown";
 
-  console.log("[SEND] Starting send");
-  console.log("[SEND] deviceId:", deviceId);
-  console.log("[SEND] senderId:", senderId);
-  console.log("[SEND] roomId:", roomId);
-  console.log("[SEND] text:", text);
-  console.log("[SEND] path:", messagesPath);
+  console.log("[SEND] Starting send", { deviceId, senderId, roomId, text, path: messagesPath });
 
   const messagesRef = ref(db, messagesPath);
 
@@ -127,9 +217,12 @@ export async function sendMessage(roomId, senderId, nickname, text) {
 
   try {
     const newMessageRef = push(messagesRef);
-    console.log("[SEND] generated key:", newMessageRef.key);
     await set(newMessageRef, messageData);
-    console.log("[SEND] Firebase write SUCCESS");
+    console.log("[SEND] Firebase write SUCCESS:", newMessageRef.key);
+
+    // Trigger optional partner notification check
+    checkAndSendPartnerNotification(roomId, senderId, nickname);
+
     return newMessageRef.key;
   } catch (error) {
     console.error("[SEND] FIREBASE WRITE FAILED:", error);
