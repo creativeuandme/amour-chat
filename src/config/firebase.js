@@ -1,4 +1,4 @@
-// Official Google Firebase Realtime Database Engine with Guaranteed Listener Registration
+// Official Google Firebase Realtime Database Engine with Clean State Update Logic
 
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, set, push, onValue, off, remove } from 'firebase/database';
@@ -109,12 +109,12 @@ function initSync(roomId) {
     });
   }
 
-  // 5. REST HTTPS Polling Fallback (every 1s)
+  // 5. REST HTTPS Polling Fallback (every 2s) for backup
   fetchFirebaseRestFallback(cleanRoomId);
   if (fallbackPollTimer) clearInterval(fallbackPollTimer);
   fallbackPollTimer = setInterval(() => {
     fetchFirebaseRestFallback(cleanRoomId);
-  }, 1000);
+  }, 2000);
 }
 
 function attachFirebaseListeners(cleanRoomId) {
@@ -184,7 +184,8 @@ function processFirebaseMessagesData(data) {
     }
   });
 
-  if (updated || cloudMsgList.length > 0) {
+  // ONLY notify listeners when a message is new or updated (prevents constant 1s re-renders)
+  if (updated) {
     messagesStore.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
     saveLocalMessages(currentRoomId, messagesStore);
     notifyMessages();
@@ -243,7 +244,6 @@ export function listenToConnectionState(onStateChange) {
 }
 
 export function listenToMessages(roomId, callback) {
-  // CRITICAL FIX: Add callback to messageListeners BEFORE calling initSync
   if (!messageListeners.includes(callback)) {
     messageListeners.push(callback);
   }
@@ -343,7 +343,7 @@ async function sendMsgPayloadInternal(roomId, payload) {
     } catch (e) {}
   }
 
-  // 3. Push to Firebase Realtime WebSockets
+  // 3. Push to Firebase Realtime Database WebSockets (<10ms)
   const cleanRoomId = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
   try {
     const roomMsgsRef = ref(db, `rooms/${cleanRoomId}/messages`);
@@ -351,16 +351,6 @@ async function sendMsgPayloadInternal(roomId, payload) {
   } catch (e) {
     console.error('Firebase DB Push error:', e);
   }
-
-  // 4. HTTPS REST POST Fallback
-  try {
-    const restUrl = `${firebaseConfig.databaseURL}/rooms/${cleanRoomId}/messages.json`;
-    await fetch(restUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newMsg)
-    });
-  } catch (e) {}
 
   return msgId;
 }
