@@ -1,4 +1,4 @@
-// Instrumented Single Source of Truth Firebase Realtime Database Client
+// Single Source of Truth Firebase Realtime Database Client with Precise Diagnostic Instrumentation
 
 import { initializeApp } from 'firebase/app';
 import {
@@ -28,31 +28,11 @@ console.log("[FIREBASE] initialized");
 console.log("[FIREBASE] databaseURL:", firebaseConfig.databaseURL);
 
 /**
- * 12. Minimal Temporary Firebase Test
- */
-export async function runFirebaseDiagnosticTest() {
-  const testRef = ref(db, "debug/test");
-  try {
-    await set(testRef, {
-      message: "Firebase test",
-      timestamp: Date.now()
-    });
-    console.log("[TEST] Firebase write completed");
-    onValue(testRef, (snapshot) => {
-      console.log("[TEST] Firebase read:", snapshot.val());
-    }, { onlyOnce: true });
-  } catch (error) {
-    console.error("[TEST] Firebase test write failed:", error);
-  }
-}
-
-/**
  * Listen to Connection State
  */
 export function listenToConnectionState(onStateChange) {
   const connectedRef = ref(db, '.info/connected');
   const unsubscribe = onValue(connectedRef, (snap) => {
-    console.log("[FIREBASE CONNECTION] connected:", snap.val());
     onStateChange(snap.val() === true);
   });
   return () => unsubscribe();
@@ -77,20 +57,30 @@ export function listenToMessages(roomId, onMessagesUpdate) {
     (snapshot) => {
       console.log("[LISTENER] Firebase update received");
       console.log("[LISTENER] snapshot exists:", snapshot.exists());
-      console.log("[LISTENER] raw data:", snapshot.val());
-
       const data = snapshot.val();
+      console.log("[LISTENER] raw data:", data);
+
       if (!data) {
         onMessagesUpdate([]);
         return;
       }
 
-      const messages = Object.entries(data).map(([id, message]) => ({
-        id,
-        ...message
-      }));
+      const messages = Object.entries(data).map(([id, message]) => {
+        console.log("[REMOTE MESSAGE RECEIVED]", {
+          id,
+          senderId: message.senderId,
+          nickname: message.nickname,
+          text: message.text,
+          timestamp: message.timestamp
+        });
+        return {
+          id,
+          ...message
+        };
+      });
 
-      messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      // Sort chronologically by numeric timestamp
+      messages.sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
 
       onMessagesUpdate(messages);
     },
@@ -116,9 +106,13 @@ export async function sendMessage(roomId, senderId, nickname, text) {
   if (!roomId || !text.trim()) return;
 
   const messagesPath = `rooms/${roomId}/messages`;
+  const deviceId = localStorage.getItem("amourchat_device_id") || "unknown";
+
   console.log("[SEND] Starting send");
+  console.log("[SEND] deviceId:", deviceId);
+  console.log("[SEND] senderId:", senderId);
   console.log("[SEND] roomId:", roomId);
-  console.log("[SEND] message:", text);
+  console.log("[SEND] text:", text);
   console.log("[SEND] path:", messagesPath);
 
   const messagesRef = ref(db, messagesPath);

@@ -13,6 +13,8 @@ export default function MessageList({
   const scrollRef = useRef(null);
   const [activeReactionMsgId, setActiveReactionMsgId] = useState(null);
 
+  console.log("[RENDER MESSAGE COUNT]", messages.length);
+
   // Auto scroll to bottom
   useEffect(() => {
     if (scrollRef.current) {
@@ -50,7 +52,7 @@ export default function MessageList({
                 key={msg.id || index}
                 className={`message-bubble-wrapper ${isMe ? 'mine' : 'partner'}`}
               >
-                {!isMe && <span className="sender-name-label">{msg.senderName}</span>}
+                {!isMe && <span className="sender-name-label">{msg.nickname || msg.senderName || 'Partner'}</span>}
 
                 <div className="bubble-content-box">
                   <div className="bubble-text">{msg.text}</div>

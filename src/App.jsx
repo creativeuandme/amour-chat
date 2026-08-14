@@ -23,11 +23,23 @@ import {
   listenToMessages,
   clearRoomMessages,
   addReactionToMessage,
-  listenToConnectionState,
-  runFirebaseDiagnosticTest
+  listenToConnectionState
 } from './config/firebase';
 
 export default function App() {
+  // 0. Persistent Device ID (Unique per browser/device)
+  const [deviceId] = useState(() => {
+    let id = localStorage.getItem('amourchat_device_id');
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'dev_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now().toString(36);
+      localStorage.setItem('amourchat_device_id', id);
+    }
+    console.log("[DEVICE ID]", id);
+    return id;
+  });
+
   // 1. Room ID Initialization
   const [roomId, setRoomId] = useState(() => {
     let id = getRoomIdFromUrl();
@@ -38,7 +50,7 @@ export default function App() {
     return id;
   });
 
-  // 2. Current User State
+  // 2. Current User Identity (Unique per browser/device)
   const [userId] = useState(() => {
     let savedId = localStorage.getItem('amour_user_id');
     if (!savedId) {
@@ -49,10 +61,10 @@ export default function App() {
   });
 
   const [nickname, setNickname] = useState(() => {
-    return localStorage.getItem(`amour_nickname_${roomId}`) || '';
+    return localStorage.getItem(`amour_nickname_${roomId}`) || `Partner_${userId.slice(-4)}`;
   });
 
-  const [showNicknameModal, setShowNicknameModal] = useState(!nickname);
+  const [showNicknameModal, setShowNicknameModal] = useState(false);
 
   // 3. Application Data States
   const [messages, setMessages] = useState([]);
@@ -74,28 +86,29 @@ export default function App() {
 
   const prevMsgCountRef = useRef(0);
 
-  // Diagnostic Test Mount
-  useEffect(() => {
-    runFirebaseDiagnosticTest();
-  }, []);
-
   // Sync theme attribute
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('amour_theme', theme);
   }, [theme]);
 
-  // Update room URL & nickname
+  // Log Complete Client Identity & Room URL
   useEffect(() => {
     updateRoomUrl(roomId);
     const savedNick = localStorage.getItem(`amour_nickname_${roomId}`);
     if (savedNick) {
       setNickname(savedNick);
-      setShowNicknameModal(false);
-    } else {
-      setShowNicknameModal(true);
     }
-  }, [roomId]);
+
+    console.log("[IDENTITY]", {
+      deviceId,
+      currentUserId: userId,
+      nickname,
+      roomId,
+      path: `rooms/${roomId}/messages`,
+      url: window.location.href
+    });
+  }, [roomId, userId, nickname, deviceId]);
 
   // Real-Time Subscriptions & Logging
   useEffect(() => {
@@ -111,7 +124,7 @@ export default function App() {
     });
 
     const unsubMsgs = listenToMessages(roomId, (msgList) => {
-      console.log("[STATE] Updating messages:", msgList);
+      console.log("[MESSAGES STATE AFTER RECEIVE]", msgList);
       setMessages(msgList);
 
       if (
@@ -151,7 +164,7 @@ export default function App() {
   };
 
   const handleSendMessage = async (text) => {
-    const currentNick = nickname || localStorage.getItem(`amour_nickname_${roomId}`) || 'Anonymous';
+    const currentNick = nickname || `Partner_${userId.slice(-4)}`;
     await sendMessage(roomId, userId, currentNick, text);
   };
 
